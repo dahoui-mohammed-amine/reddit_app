@@ -491,6 +491,20 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(len(calls), 3)
 
+    def test_json_client_does_not_retry_nonretryable_transport_errors(self) -> None:
+        calls: list[int] = []
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            calls.append(len(calls))
+            raise ProviderError("terminal transport failure", status=401)
+
+        client = JsonClient(timeout=1, retries=2, transport=transport, sleep=lambda _: None)
+        with self.assertRaises(ProviderError) as context:
+            client.request("GET", "https://example.test", headers={})
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(context.exception.retryable)
+        self.assertEqual(len(client.last_attempts), 1)
+
     def test_retried_provider_request_persists_each_attempt_record(self) -> None:
         calls: list[int] = []
 

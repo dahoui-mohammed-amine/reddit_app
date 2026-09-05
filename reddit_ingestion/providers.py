@@ -93,7 +93,7 @@ class JsonClient:
             except ProviderError as exc:
                 self.last_attempts.append(RequestAttempt(exc.status, exc.billed, str(exc)))
                 exc.url = exc.url or url
-                if attempt >= self.retries:
+                if not exc.retryable or attempt >= self.retries:
                     exc.request_id = exc.request_id or request_id
                     exc.attempts = list(self.last_attempts)
                     raise
