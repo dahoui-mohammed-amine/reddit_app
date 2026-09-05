@@ -49,6 +49,7 @@ class PostSnapshot:
     removal_known: bool = False
     archived_known: bool = False
     locked_known: bool = False
+    refresh_until: str | None = None
 
 
 @dataclass(slots=True)

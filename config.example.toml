@@ -5,6 +5,7 @@ listing_limit = 100
 max_discovery_pages = 1
 refresh_interval_minutes = 360
 max_refresh_posts = 100
+refresh_expiry_days = 30
 
 [comments]
 mode = "bounded"

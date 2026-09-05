@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .comments import apply_comment_policy
 from .config import Config
 from .db import Database
-from .models import Gap, PageResult, Plan, RefreshResult, RunSummary, RequestRecord
+from .models import Gap, PageResult, Plan, PostSnapshot, RefreshResult, RunSummary, RequestRecord
 from .normalize import utc_now
 from .providers import Provider, ProviderError, _failed_request_records
 
@@ -20,10 +21,27 @@ def config_dict(config: Config) -> dict[str, Any]:
     return data
 
 
+def _apply_refresh_expiry(posts: list[PostSnapshot], config: Config) -> None:
+    for post in posts:
+        if post.refresh_until:
+            continue
+        for value in (post.created_at, post.observed_at):
+            if not value:
+                continue
+            try:
+                observed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            post.refresh_until = (observed + timedelta(days=config.refresh_expiry_days)).isoformat().replace("+00:00", "Z")
+            break
+
+
 def plan_for(db: Database, provider: Provider, config: Config, mode: str = "run") -> Plan:
     if mode not in {"run", "discover", "refresh"}:
         raise ValueError("mode must be run, discover, or refresh")
-    known = db.counts()["posts"]
+    known = db.refreshable_post_count(config.subreddits)
     resume_pages = sum(
         1
         for subreddit in config.subreddits
@@ -92,6 +110,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                     at_page_cap = resumed_page_number >= config.max_discovery_pages - 1
                     if page.next_cursor and at_page_cap and not blocked and not page.metadata.get("request_failed") and not provider_incomplete:
                         page.gaps.append(Gap("listing", "truncated", subreddit=subreddit, detail=f"max_discovery_pages={config.max_discovery_pages}"))
+                    _apply_refresh_expiry(page.posts, config)
                     with db.transaction():
                         discovered, comments = db.save_page(run_id, provider.name, subreddit, page)
                     summary.discovered += discovered
@@ -107,7 +126,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                         break
                     cursor = page.next_cursor
         if mode in {"run", "refresh"}:
-            due = db.due_posts(config.refresh_interval_minutes, config.max_refresh_posts)
+            due = db.due_posts(config.refresh_interval_minutes, config.max_refresh_posts, config.subreddits)
             if due:
                 try:
                     result = provider.refresh_posts(due, config)
@@ -126,6 +145,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                 result.gaps.extend(apply_comment_policy(result.posts, config))
                 if any(gap.entity_type == "comment" for gap in result.gaps):
                     result.metadata["comments_expanded"] = False
+                _apply_refresh_expiry(result.posts, config)
                 with db.transaction():
                     refreshed, comments = db.save_refresh(run_id, provider.name, result)
                 summary.refreshed += refreshed

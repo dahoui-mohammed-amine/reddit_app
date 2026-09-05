@@ -144,6 +144,50 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(scores, [12, 15])
             db.close()
 
+    def test_refresh_scope_and_expiry_preserve_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-01T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            posts = [
+                PostSnapshot("active", "t3_active", "SaaS", observed_at=observed, refresh_until="2099-01-01T00:00:00Z"),
+                PostSnapshot("removed-scope", "t3_removed-scope", "freelance", observed_at=observed, refresh_until="2099-01-01T00:00:00Z"),
+                PostSnapshot("expired", "t3_expired", "SaaS", observed_at=observed, refresh_until="2020-01-01T00:00:00Z"),
+            ]
+            with db.transaction():
+                db.save_page(run_id, "fixture", "SaaS", PageResult(posts, None, None, observed, "fixture://posts", 200, "fixture"))
+            cfg = replace(config(root), subreddits=("SaaS",))
+            due = db.due_posts(cfg.refresh_interval_minutes, cfg.max_refresh_posts, cfg.subreddits)
+            self.assertEqual([post.post_id for post in due], ["active"])
+            plan = plan_for(db, FixtureProvider(FIXTURE), cfg, "refresh")
+            self.assertEqual(plan.refresh_events, 1)
+            class RecordingProvider:
+                name = "fixture"
+
+                def __init__(self) -> None:
+                    self.post_ids: list[str] = []
+
+                def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
+                    self.post_ids = [post.post_id for post in posts]
+                    return RefreshResult([], observed, None, 200)
+
+            provider = RecordingProvider()
+            run_once(db, provider, cfg, "refresh")
+            self.assertEqual(provider.post_ids, ["active"])
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0], 3)
+            db.close()
+
+    def test_discovery_sets_configured_refresh_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root), subreddits=("SaaS",), refresh_expiry_days=2)
+            run_once(db, FixtureProvider(FIXTURE), cfg, "discover")
+            refresh_until = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='saas001'").fetchone()[0]
+            self.assertEqual(refresh_until, "2026-09-06T13:00:00Z")
+            db.close()
+
     def test_partial_comment_results_do_not_delete_existing_comments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

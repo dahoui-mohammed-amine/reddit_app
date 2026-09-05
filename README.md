@@ -23,6 +23,7 @@ Copy `config.example.toml` and edit the explicit `[ingestion]`, `[comments]`, an
 
 - `listing_limit` is capped at Reddit-style 100.
 - `refresh_interval_minutes` controls which stored posts are due for a later `refresh` pass.
+- `refresh_expiry_days` sets each post's refresh-until window from its source creation time; expired posts remain stored with their history but are no longer refreshed.
 - `comments.mode` is `bounded` or `full`. Bounded mode records explicit gaps when depth/limit truncates comments. Full mode is opt-in.
 - `provider.min_request_interval_seconds` paces live requests before each attempt; retry backoff and provider retry-after values still apply.
 - `provider.name` is `fixture`, `redditapis`, or `fetchlayer`.

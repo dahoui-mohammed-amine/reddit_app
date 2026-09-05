@@ -22,8 +22,13 @@ def _existing_plan_state(path: Path, provider: str, subreddits: tuple[str, ...])
         return 0, 0
     try:
         try:
-            known_posts = int(connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0])
             placeholders = ",".join("?" for _ in subreddits)
+            post_columns = {row[1] for row in connection.execute("PRAGMA table_info(posts)")}
+            known_query = f"SELECT COUNT(*) FROM posts WHERE subreddit IN ({placeholders})"
+            known_params: tuple[object, ...] = tuple(subreddits)
+            if "refresh_until" in post_columns:
+                known_query += " AND (refresh_until IS NULL OR datetime(refresh_until) > datetime('now'))"
+            known_posts = int(connection.execute(known_query, known_params).fetchone()[0])
             resume_pages = int(
                 connection.execute(
                     f"SELECT COUNT(*) FROM checkpoints WHERE provider = ? AND cursor IS NOT NULL AND subreddit IN ({placeholders})",

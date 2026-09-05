@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS posts (
     deleted INTEGER NOT NULL DEFAULT 0,
     removed INTEGER NOT NULL DEFAULT 0,
     observed_at TEXT NOT NULL,
+    refresh_until TEXT,
     provider TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -121,8 +122,14 @@ class Database:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.executescript(SCHEMA)
+        self._migrate_posts()
         self._migrate_requests()
         self.connection.commit()
+
+    def _migrate_posts(self) -> None:
+        columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(posts)")}
+        if "refresh_until" not in columns:
+            self.connection.execute("ALTER TABLE posts ADD COLUMN refresh_until TEXT")
 
     def _migrate_requests(self) -> None:
         columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(requests)")}
@@ -258,10 +265,10 @@ class Database:
             clear_post_content.append("posts.removed")
         clear_post_content = " OR ".join(clear_post_content)
         self.connection.execute(
-            f"""INSERT INTO posts(post_id, fullname, subreddit, title, body, author, permalink, url, created_at, score, ups, upvote_ratio, num_comments, archived, locked, deleted, removed, observed_at, provider, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(excluded.created_at, posts.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), {archived_update}, {locked_update}, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, provider=excluded.provider, updated_at=excluded.updated_at""",
-            (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, provider, post.observed_at),
+            f"""INSERT INTO posts(post_id, fullname, subreddit, title, body, author, permalink, url, created_at, score, ups, upvote_ratio, num_comments, archived, locked, deleted, removed, observed_at, refresh_until, provider, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(excluded.created_at, posts.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), {archived_update}, {locked_update}, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, refresh_until=COALESCE(posts.refresh_until, excluded.refresh_until), provider=excluded.provider, updated_at=excluded.updated_at""",
+            (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, post.refresh_until, provider, post.observed_at),
         )
 
     def _save_observation(self, post: PostSnapshot, provider: str, result: PageResult | RefreshResult, request: RequestRecord | None = None) -> None:
@@ -336,9 +343,28 @@ class Database:
             billed = False if provider == "fixture" else False if cache_status == "cached" else None
         self.connection.execute("INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)", (request_id, run_id, provider, operation, status, None if billed is None else int(billed), cache_status, cache_observed_at, json.dumps(request_metadata, sort_keys=True)))
 
-    def due_posts(self, interval_minutes: int, limit: int) -> list[PostSnapshot]:
-        rows = self.connection.execute("SELECT * FROM posts WHERE datetime(observed_at) <= datetime('now', ?) ORDER BY observed_at ASC LIMIT ?", (f"-{interval_minutes} minutes", limit)).fetchall()
-        return [PostSnapshot(post_id=row["post_id"], fullname=row["fullname"], subreddit=row["subreddit"], title=row["title"], body=row["body"], author=row["author"], permalink=row["permalink"], url=row["url"], created_at=row["created_at"], score=row["score"], ups=row["ups"], upvote_ratio=row["upvote_ratio"], num_comments=row["num_comments"], archived=bool(row["archived"]), locked=bool(row["locked"]), deleted=bool(row["deleted"]), removed=bool(row["removed"]), observed_at=row["observed_at"]) for row in rows]
+    def refreshable_post_count(self, subreddits: tuple[str, ...]) -> int:
+        if not subreddits:
+            return 0
+        placeholders = ",".join("?" for _ in subreddits)
+        row = self.connection.execute(
+            f"SELECT COUNT(*) FROM posts WHERE subreddit IN ({placeholders}) AND (refresh_until IS NULL OR datetime(refresh_until) > datetime('now'))",
+            subreddits,
+        ).fetchone()
+        return int(row[0])
+
+    def due_posts(self, interval_minutes: int, limit: int, subreddits: tuple[str, ...] | None = None) -> list[PostSnapshot]:
+        if subreddits is not None and not subreddits:
+            return []
+        conditions = ["datetime(observed_at) <= datetime('now', ?)", "(refresh_until IS NULL OR datetime(refresh_until) > datetime('now'))"]
+        params: list[Any] = [f"-{interval_minutes} minutes"]
+        if subreddits is not None:
+            placeholders = ",".join("?" for _ in subreddits)
+            conditions.append(f"subreddit IN ({placeholders})")
+            params.extend(subreddits)
+        params.append(limit)
+        rows = self.connection.execute(f"SELECT * FROM posts WHERE {' AND '.join(conditions)} ORDER BY observed_at ASC LIMIT ?", params).fetchall()
+        return [PostSnapshot(post_id=row["post_id"], fullname=row["fullname"], subreddit=row["subreddit"], title=row["title"], body=row["body"], author=row["author"], permalink=row["permalink"], url=row["url"], created_at=row["created_at"], score=row["score"], ups=row["ups"], upvote_ratio=row["upvote_ratio"], num_comments=row["num_comments"], archived=bool(row["archived"]), locked=bool(row["locked"]), deleted=bool(row["deleted"]), removed=bool(row["removed"]), observed_at=row["observed_at"], refresh_until=row["refresh_until"]) for row in rows]
 
     def purge_deleted_content(self) -> int:
         post_count = self.connection.execute("UPDATE posts SET title=NULL, body=NULL, author=NULL WHERE deleted=1 OR removed=1").rowcount
