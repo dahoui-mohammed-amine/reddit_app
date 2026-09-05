@@ -20,7 +20,9 @@ def config_dict(config: Config) -> dict[str, Any]:
     return data
 
 
-def plan_for(db: Database, provider: Provider, config: Config) -> Plan:
+def plan_for(db: Database, provider: Provider, config: Config, mode: str = "run") -> Plan:
+    if mode not in {"run", "discover", "refresh"}:
+        raise ValueError("mode must be run, discover, or refresh")
     known = db.counts()["posts"]
     resume_pages = sum(
         1
@@ -29,7 +31,7 @@ def plan_for(db: Database, provider: Provider, config: Config) -> Plan:
         and checkpoint["provider"] == provider.name
         and checkpoint["cursor"]
     )
-    return provider.plan(config, known, resume_pages=resume_pages)
+    return provider.plan(config, known, resume_pages=resume_pages, mode=mode)
 
 
 def _request_units(records: list[RequestRecord], request_id: str | None) -> int:

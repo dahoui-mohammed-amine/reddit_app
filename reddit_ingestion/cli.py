@@ -61,11 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         status = provider.status()
         if args.dry_run:
             known_posts, resume_pages = _existing_plan_state(config.database_path, provider.name, config.subreddits)
-            plan = provider.plan(config, known_posts, resume_pages=resume_pages)
+            plan = provider.plan(config, known_posts, resume_pages=resume_pages, mode=args.mode)
             print(json.dumps({"status": "dry_run", "provider": asdict(status), "database": str(config.database_path), "plan": json.loads(render_plan(plan))}, indent=2))
             return 0
         db = Database(config.database_path)
-        plan = plan_for(db, provider, config)
+        plan = plan_for(db, provider, config, mode=args.mode)
         if args.command == "status":
             print(json.dumps({"provider": asdict(status), "database": str(config.database_path), "counts": db.counts(), "subreddits": list(config.subreddits)}, indent=2))
             return 0 if status.available else 2

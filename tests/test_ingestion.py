@@ -757,6 +757,16 @@ fixture_path = \"{FIXTURE}\"
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["status"], "dry_run")
             self.assertEqual(payload["plan"]["refresh_events"], 1)
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli_main(["plan", "--config", str(config_path), "--dry-run", "--mode", "discover"]), 0)
+            discover_payload = json.loads(output.getvalue())
+            self.assertEqual(discover_payload["plan"]["refresh_events"], 0)
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli_main(["plan", "--config", str(config_path), "--dry-run", "--mode", "refresh"]), 0)
+            refresh_payload = json.loads(output.getvalue())
+            self.assertEqual(refresh_payload["plan"]["discovery_requests"], 0)
             check = Database(database_path)
             try:
                 self.assertEqual(check.counts()["posts"], 1)
@@ -801,6 +811,12 @@ fixture_path = \"{FIXTURE}\"
         gaps = apply_comment_policy([post], config(Path("/tmp"), comments="full"))
         self.assertEqual(len(gaps), 1)
         self.assertEqual(gaps[0].reason, "unexpanded")
+
+    def test_bounded_policy_excludes_unknown_depth(self) -> None:
+        post = PostSnapshot("p", "t3_p", "freelance", comments=[CommentSnapshot("c", "t1_c", "p")])
+        gaps = apply_comment_policy([post], config(Path("/tmp")))
+        self.assertEqual(post.comments, [])
+        self.assertEqual(gaps[0].reason, "bounded_depth")
 
 
 if __name__ == "__main__":

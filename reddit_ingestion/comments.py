@@ -30,7 +30,7 @@ def apply_comment_policy(posts: list[PostSnapshot], config: Config) -> list[Gap]
     for post in posts:
         original = post.comments
         if config.comments_mode == "bounded":
-            kept = [comment for comment in original if comment.depth is None or comment.depth <= config.comment_depth]
+            kept = [comment for comment in original if comment.depth is not None and comment.depth <= config.comment_depth]
             if len(kept) > config.comment_limit:
                 kept = kept[: config.comment_limit]
                 gaps.append(Gap("comment", "bounded_limit", entity_id=post.post_id, subreddit=post.subreddit, detail=f"limit={config.comment_limit}"))
