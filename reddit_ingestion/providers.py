@@ -260,6 +260,7 @@ def _parse_post_items(
         return [], [_malformed_gap("listing", subreddit=default_subreddit, detail="post collection is not a list")]
     posts: list[PostSnapshot] = []
     gaps: list[Gap] = []
+    seen_post_ids: set[str] = set()
     for item in items:
         if not isinstance(item, Mapping):
             gaps.append(_malformed_gap("post", subreddit=default_subreddit, detail="post item is not an object"))
@@ -276,6 +277,9 @@ def _parse_post_items(
         except (TypeError, ValueError) as exc:
             gaps.append(_malformed_gap("post", subreddit=default_subreddit, detail=str(exc)))
             continue
+        if post.post_id in seen_post_ids:
+            continue
+        seen_post_ids.add(post.post_id)
         posts.append(post)
         gaps.extend(
             _malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc))
@@ -573,8 +577,9 @@ class RedditApisProvider(HttpProviderBase):
                 if next_cursor or incomplete:
                     gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="bounded provider response has additional or incomplete comments"))
                 break
-            if incomplete and not next_cursor:
+            if incomplete:
                 gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="full provider response is incomplete"))
+                break
             if not next_cursor:
                 break
             cursor = str(next_cursor)

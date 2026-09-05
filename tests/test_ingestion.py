@@ -440,6 +440,39 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(len(result.posts[0].comments), 1)
             self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
 
+    def test_full_comments_stop_on_truncated_page(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.comment_calls = 0
+
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 1}]}, HttpResponse(200, {}, b""), "post-request"
+                self.comment_calls += 1
+                return {"comments": [{"id": "c", "name": "t1_c", "body": "one"}], "after": "next", "listing_status": "truncated"}, HttpResponse(200, {}, b""), "comment-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis", comments="full")
+            client = Client()
+            result = RedditApisProvider(cfg, client=client).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertEqual(client.comment_calls, 1)
+            self.assertEqual(len(result.posts[0].comments), 1)
+            self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
+
+    def test_discovery_deduplicates_post_listing_items(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/posts?" in url:
+                    item = {"id": "p", "name": "t3_p", "num_comments": 0}
+                    return {"posts": [item, item], "after": None}, HttpResponse(200, {}, b""), "listing-request"
+                return {"comments": []}, HttpResponse(200, {}, b""), "comment-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis")
+            result = RedditApisProvider(cfg, client=Client()).discover("freelance", None, cfg)
+            self.assertEqual([post.post_id for post in result.posts], ["p"])
+            self.assertEqual(len(result.request_records), 2)
+
     def test_missing_comment_collection_is_an_unexpanded_gap(self) -> None:
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
@@ -945,6 +978,27 @@ fixture_path = \"{FIXTURE}\"
         gaps = apply_comment_policy([post], config(Path("/tmp"), comments="full"))
         self.assertEqual(len(gaps), 1)
         self.assertEqual(gaps[0].reason, "unexpanded")
+
+    def test_negative_comment_count_is_not_complete(self) -> None:
+        post = PostSnapshot("p", "t3_p", "freelance", num_comments=-1)
+        gaps = apply_comment_policy([post], config(Path("/tmp"), comments="full"))
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0].reason, "unexpanded")
+
+    def test_bounded_limit_does_not_create_false_depth_or_count_gap(self) -> None:
+        post = PostSnapshot(
+            "p",
+            "t3_p",
+            "freelance",
+            num_comments=2,
+            comments=[
+                CommentSnapshot("c1", "t1_c1", "p", depth=0),
+                CommentSnapshot("c2", "t1_c2", "p", depth=1),
+            ],
+        )
+        gaps = apply_comment_policy([post], replace(config(Path("/tmp")), comment_limit=1, comment_depth=1))
+        self.assertEqual([gap.reason for gap in gaps], ["bounded_limit"])
+        self.assertEqual([comment.comment_id for comment in post.comments], ["c1"])
 
     def test_bounded_policy_excludes_unknown_depth(self) -> None:
         post = PostSnapshot("p", "t3_p", "freelance", comments=[CommentSnapshot("c", "t1_c", "p")])
