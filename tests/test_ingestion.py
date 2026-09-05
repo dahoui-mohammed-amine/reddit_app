@@ -154,6 +154,7 @@ class IngestionTests(unittest.TestCase):
                 PostSnapshot("active", "t3_active", "SaaS", observed_at=observed, refresh_until="2099-01-01T00:00:00Z"),
                 PostSnapshot("removed-scope", "t3_removed-scope", "freelance", observed_at=observed, refresh_until="2099-01-01T00:00:00Z"),
                 PostSnapshot("expired", "t3_expired", "SaaS", observed_at=observed, refresh_until="2020-01-01T00:00:00Z"),
+                PostSnapshot("legacy", "t3_legacy", "SaaS", created_at="2020-01-01T00:00:00Z", observed_at=observed),
             ]
             with db.transaction():
                 db.save_page(run_id, "fixture", "SaaS", PageResult(posts, None, None, observed, "fixture://posts", 200, "fixture"))
@@ -175,7 +176,7 @@ class IngestionTests(unittest.TestCase):
             provider = RecordingProvider()
             run_once(db, provider, cfg, "refresh")
             self.assertEqual(provider.post_ids, ["active"])
-            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0], 3)
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0], 4)
             db.close()
 
     def test_discovery_sets_configured_refresh_expiry(self) -> None:
@@ -186,6 +187,33 @@ class IngestionTests(unittest.TestCase):
             run_once(db, FixtureProvider(FIXTURE), cfg, "discover")
             refresh_until = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='saas001'").fetchone()[0]
             self.assertEqual(refresh_until, "2026-09-06T13:00:00Z")
+            db.close()
+
+    def test_numeric_created_timestamp_sets_source_based_expiry(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                return PageResult(
+                    [PostSnapshot("numeric", "t3_numeric", subreddit, created_at="0", observed_at="2026-09-06T00:00:00Z")],
+                    cursor,
+                    None,
+                    "2026-09-06T00:00:00Z",
+                    "fixture://numeric",
+                    200,
+                    "fixture",
+                )
+
+            def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
+                raise AssertionError("refresh is not part of discovery mode")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root), subreddits=("freelance",), refresh_expiry_days=30)
+            run_once(db, Provider(), cfg, "discover")
+            refresh_until = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='numeric'").fetchone()[0]
+            self.assertEqual(refresh_until, "1970-01-31T00:00:00Z")
             db.close()
 
     def test_partial_comment_results_do_not_delete_existing_comments(self) -> None:

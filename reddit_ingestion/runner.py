@@ -21,27 +21,35 @@ def config_dict(config: Config) -> dict[str, Any]:
     return data
 
 
+def _parse_refresh_time(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+
+
 def _apply_refresh_expiry(posts: list[PostSnapshot], config: Config) -> None:
     for post in posts:
         if post.refresh_until:
             continue
-        for value in (post.created_at, post.observed_at):
-            if not value:
-                continue
-            try:
-                observed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if observed.tzinfo is None:
-                observed = observed.replace(tzinfo=timezone.utc)
-            post.refresh_until = (observed + timedelta(days=config.refresh_expiry_days)).isoformat().replace("+00:00", "Z")
-            break
+        if post.created_at:
+            observed = _parse_refresh_time(post.created_at)
+        else:
+            observed = _parse_refresh_time(post.observed_at) if post.observed_at else None
+        if observed is None:
+            continue
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        post.refresh_until = (observed + timedelta(days=config.refresh_expiry_days)).isoformat().replace("+00:00", "Z")
 
 
 def plan_for(db: Database, provider: Provider, config: Config, mode: str = "run") -> Plan:
     if mode not in {"run", "discover", "refresh"}:
         raise ValueError("mode must be run, discover, or refresh")
-    known = db.refreshable_post_count(config.subreddits)
+    known = db.refreshable_post_count(config.subreddits, config.refresh_expiry_days)
     resume_pages = sum(
         1
         for subreddit in config.subreddits
@@ -126,7 +134,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                         break
                     cursor = page.next_cursor
         if mode in {"run", "refresh"}:
-            due = db.due_posts(config.refresh_interval_minutes, config.max_refresh_posts, config.subreddits)
+            due = db.due_posts(config.refresh_interval_minutes, config.max_refresh_posts, config.subreddits, config.refresh_expiry_days)
             if due:
                 try:
                     result = provider.refresh_posts(due, config)

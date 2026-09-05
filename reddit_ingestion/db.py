@@ -10,6 +10,9 @@ from typing import Any, Iterator
 from .models import CommentSnapshot, Gap, PageResult, PostSnapshot, RefreshResult, RequestRecord
 
 
+REFRESH_ELIGIBILITY = "(refresh_until IS NOT NULL AND datetime(refresh_until) > datetime('now')) OR (refresh_until IS NULL AND datetime(CASE WHEN created_at IS NOT NULL THEN COALESCE(datetime(created_at), datetime(created_at, 'unixepoch')) ELSE datetime(observed_at) END, '+' || ? || ' days') > datetime('now'))"
+
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS runs (
@@ -343,21 +346,21 @@ class Database:
             billed = False if provider == "fixture" else False if cache_status == "cached" else None
         self.connection.execute("INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)", (request_id, run_id, provider, operation, status, None if billed is None else int(billed), cache_status, cache_observed_at, json.dumps(request_metadata, sort_keys=True)))
 
-    def refreshable_post_count(self, subreddits: tuple[str, ...]) -> int:
+    def refreshable_post_count(self, subreddits: tuple[str, ...], refresh_expiry_days: int = 30) -> int:
         if not subreddits:
             return 0
         placeholders = ",".join("?" for _ in subreddits)
         row = self.connection.execute(
-            f"SELECT COUNT(*) FROM posts WHERE subreddit IN ({placeholders}) AND (refresh_until IS NULL OR datetime(refresh_until) > datetime('now'))",
-            subreddits,
+            f"SELECT COUNT(*) FROM posts WHERE subreddit IN ({placeholders}) AND ({REFRESH_ELIGIBILITY})",
+            (*subreddits, refresh_expiry_days),
         ).fetchone()
         return int(row[0])
 
-    def due_posts(self, interval_minutes: int, limit: int, subreddits: tuple[str, ...] | None = None) -> list[PostSnapshot]:
+    def due_posts(self, interval_minutes: int, limit: int, subreddits: tuple[str, ...] | None = None, refresh_expiry_days: int = 30) -> list[PostSnapshot]:
         if subreddits is not None and not subreddits:
             return []
-        conditions = ["datetime(observed_at) <= datetime('now', ?)", "(refresh_until IS NULL OR datetime(refresh_until) > datetime('now'))"]
-        params: list[Any] = [f"-{interval_minutes} minutes"]
+        conditions = ["datetime(observed_at) <= datetime('now', ?)", f"({REFRESH_ELIGIBILITY})"]
+        params: list[Any] = [f"-{interval_minutes} minutes", refresh_expiry_days]
         if subreddits is not None:
             placeholders = ",".join("?" for _ in subreddits)
             conditions.append(f"subreddit IN ({placeholders})")

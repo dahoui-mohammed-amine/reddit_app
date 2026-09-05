@@ -8,12 +8,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .config import load_config
-from .db import Database
+from .db import REFRESH_ELIGIBILITY, Database
 from .providers import ProviderError, make_provider
 from .runner import plan_for, render_plan, run_once
 
 
-def _existing_plan_state(path: Path, provider: str, subreddits: tuple[str, ...]) -> tuple[int, int]:
+def _existing_plan_state(path: Path, provider: str, subreddits: tuple[str, ...], refresh_expiry_days: int = 30) -> tuple[int, int]:
     if not path.is_file():
         return 0, 0
     try:
@@ -25,9 +25,12 @@ def _existing_plan_state(path: Path, provider: str, subreddits: tuple[str, ...])
             placeholders = ",".join("?" for _ in subreddits)
             post_columns = {row[1] for row in connection.execute("PRAGMA table_info(posts)")}
             known_query = f"SELECT COUNT(*) FROM posts WHERE subreddit IN ({placeholders})"
-            known_params: tuple[object, ...] = tuple(subreddits)
             if "refresh_until" in post_columns:
-                known_query += " AND (refresh_until IS NULL OR datetime(refresh_until) > datetime('now'))"
+                known_query += f" AND ({REFRESH_ELIGIBILITY})"
+                known_params: tuple[object, ...] = (*subreddits, refresh_expiry_days)
+            else:
+                known_query += " AND datetime(CASE WHEN created_at IS NOT NULL THEN COALESCE(datetime(created_at), datetime(created_at, 'unixepoch')) ELSE datetime(observed_at) END, '+' || ? || ' days') > datetime('now')"
+                known_params = (*subreddits, refresh_expiry_days)
             known_posts = int(connection.execute(known_query, known_params).fetchone()[0])
             resume_pages = int(
                 connection.execute(
@@ -65,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         status = provider.status()
         if args.dry_run:
-            known_posts, resume_pages = _existing_plan_state(config.database_path, provider.name, config.subreddits)
+            known_posts, resume_pages = _existing_plan_state(config.database_path, provider.name, config.subreddits, config.refresh_expiry_days)
             plan = provider.plan(config, known_posts, resume_pages=resume_pages, mode=args.mode)
             print(json.dumps({"status": "dry_run", "provider": asdict(status), "database": str(config.database_path), "plan": json.loads(render_plan(plan))}, indent=2))
             return 0
