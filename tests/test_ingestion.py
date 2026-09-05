@@ -34,7 +34,6 @@ def config(tmp: Path, *, comments: str = "bounded", limit: int = 20, provider: s
         comment_limit=limit,
         request_timeout_seconds=1,
         max_retries=2,
-        allow_paid=False,
     )
 
 
@@ -82,7 +81,7 @@ class IngestionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             db = Database(Path(directory) / "db.sqlite3")
             provider = FixtureProvider(FIXTURE)
-            cfg = config(Path(directory), comments="off")
+            cfg = config(Path(directory))
             first = run_once(db, provider, cfg, "discover")
             self.assertEqual(first.discovered, 3)
             checkpoint = db.checkpoint("freelance")
@@ -169,7 +168,7 @@ class IngestionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             db = Database(Path(directory) / "db.sqlite3")
-            summary = run_once(db, BlockedProvider(), config(Path(directory), comments="off"), "discover")
+            summary = run_once(db, BlockedProvider(), config(Path(directory)), "discover")
             self.assertEqual(summary.gaps, 3)
             self.assertIsNone(db.checkpoint("freelance"))
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='blocked'").fetchone()[0], 3)
@@ -207,17 +206,20 @@ class IngestionTests(unittest.TestCase):
 
         def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
             calls.append(len(calls))
-            if len(calls) == 1:
+            if "/by_id/" in url and len(calls) == 1:
                 return HttpResponse(503, {}, b'{"error":"temporary"}')
-            return HttpResponse(200, {}, b'{"posts":[{"id":"p","name":"t3_p","score":3}]}')
+            if "/by_id/" in url:
+                return HttpResponse(200, {}, b'{"posts":[{"id":"p","name":"t3_p","score":3,"num_comments":0}]}')
+            return HttpResponse(200, {}, b'{"comments":[]}')
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
-            cfg = config(Path(directory), provider="redditapis", comments="off")
+            cfg = config(Path(directory), provider="redditapis")
             client = JsonClient(timeout=1, retries=1, transport=transport, sleep=lambda _: None)
             result = RedditApisProvider(cfg, client=client).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
-            self.assertEqual(len(result.request_records), 2)
-            self.assertEqual([record.metadata["attempt"] for record in result.request_records], [1, 2])
-            self.assertEqual([record.metadata["attempt_count"] for record in result.request_records], [2, 2])
+            refresh_records = [record for record in result.request_records if record.operation == "refresh"]
+            self.assertEqual(len(refresh_records), 2)
+            self.assertEqual([record.metadata["attempt"] for record in refresh_records], [1, 2])
+            self.assertEqual([record.metadata["attempt_count"] for record in refresh_records], [2, 2])
 
     def test_full_redditapis_plan_does_not_claim_bounded_comment_cost(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
@@ -305,10 +307,10 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='provider_error'").fetchone()[0], 3)
             db.close()
 
-    def test_comment_policy_off_and_full(self) -> None:
+    def test_comment_policy_bounded_and_full(self) -> None:
         post = PostSnapshot("p", "t3_p", comments=[CommentSnapshot("c", "t1_c", "p", depth=2)])
-        off = config(Path("/tmp"), comments="off")
-        self.assertEqual(apply_comment_policy([post], off), [])
+        bounded = config(Path("/tmp"))
+        self.assertEqual(apply_comment_policy([post], bounded)[0].reason, "bounded_depth")
         self.assertEqual(post.comments, [])
         post.comments = [CommentSnapshot("c", "t1_c", "p", depth=2)]
         full = config(Path("/tmp"), comments="full")

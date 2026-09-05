@@ -21,7 +21,6 @@ class Config:
     comment_limit: int
     request_timeout_seconds: float
     max_retries: int
-    allow_paid: bool
     request_interval_seconds: float = 0.25
 
 
@@ -49,9 +48,9 @@ def load_config(path: str | Path) -> Config:
     listing_limit = int(ingestion.get("listing_limit", 100))
     if not 1 <= listing_limit <= 100:
         raise ValueError("[ingestion].listing_limit must be between 1 and 100")
-    mode = str(comments.get("mode", "off")).lower()
-    if mode not in {"off", "bounded", "full"}:
-        raise ValueError("[comments].mode must be off, bounded, or full")
+    mode = str(comments.get("mode", "bounded")).lower()
+    if mode not in {"bounded", "full"}:
+        raise ValueError("[comments].mode must be bounded or full")
     return Config(
         subreddits=subreddits,
         database_path=_path(str(ingestion.get("database_path", "data/reddit.sqlite3")), config_path.parent)
@@ -67,6 +66,5 @@ def load_config(path: str | Path) -> Config:
         comment_limit=max(1, int(comments.get("limit", 20))),
         request_timeout_seconds=max(1.0, float(provider.get("request_timeout_seconds", 30))),
         max_retries=max(0, int(provider.get("max_retries", 3))),
-        allow_paid=bool(provider.get("allow_paid", False)),
         request_interval_seconds=max(0.0, float(provider.get("min_request_interval_seconds", 0.25))),
     )

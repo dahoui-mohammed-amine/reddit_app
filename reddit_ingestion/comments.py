@@ -18,10 +18,6 @@ def comment_count_gap(post: PostSnapshot) -> Gap | None:
 
 def apply_comment_policy(posts: list[PostSnapshot], config: Config) -> list[Gap]:
     gaps: list[Gap] = []
-    if config.comments_mode == "off":
-        for post in posts:
-            post.comments = []
-        return gaps
     for post in posts:
         original = post.comments
         if config.comments_mode == "bounded":
@@ -32,7 +28,7 @@ def apply_comment_policy(posts: list[PostSnapshot], config: Config) -> list[Gap]
             if len(kept) < len(original):
                 gaps.append(Gap("comment", "bounded_depth", entity_id=post.post_id, subreddit=post.subreddit, detail=f"depth={config.comment_depth}"))
             post.comments = kept
-        elif config.comments_mode == "full":
+        else:
             post.comments = original
         count_gap = comment_count_gap(post)
         if count_gap and not any(gap.entity_id == post.post_id and gap.reason == "unexpanded" for gap in gaps):

@@ -18,4 +18,3 @@ fixture_path = "fixtures/sample.json"
 request_timeout_seconds = 30
 max_retries = 3
 min_request_interval_seconds = 0.25
-allow_paid = false

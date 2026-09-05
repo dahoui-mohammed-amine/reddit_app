@@ -260,23 +260,22 @@ class FixtureProvider:
             return PageResult([], cursor, None, observed, f"fixture://{subreddit}/new", 200, "fixture", gaps=[Gap("listing", "fixture_page_missing", subreddit=subreddit, detail=f"cursor={cursor!r}")], request_records=[record])
         posts = [parse_post(item, default_subreddit=subreddit, observed_at=observed) for item in selected.get("posts", [])]
         gaps = [Gap(**gap) for gap in selected.get("gaps", [])]
-        if config.comments_mode != "off":
-            source = self.fixture.get("refresh", {})
-            for post in posts:
-                raw = source.get(post.post_id) or source.get(post.fullname or "")
-                if raw is None:
-                    if post.num_comments:
-                        gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=subreddit, detail="fixture has no comment expansion data"))
-                    continue
-                expanded = parse_post(raw, default_subreddit=subreddit, observed_at=observed)
-                post.comments = expanded.comments
-                if post.num_comments and not post.comments:
-                    gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=subreddit, detail="fixture expansion returned no comments"))
-                count_gap = comment_count_gap(post)
-                if count_gap and not any(gap.entity_id == post.post_id and gap.reason == "unexpanded" for gap in gaps):
-                    gaps.append(count_gap)
+        source = self.fixture.get("refresh", {})
+        for post in posts:
+            raw = source.get(post.post_id) or source.get(post.fullname or "")
+            if raw is None:
+                if post.num_comments:
+                    gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=subreddit, detail="fixture has no comment expansion data"))
+                continue
+            expanded = parse_post(raw, default_subreddit=subreddit, observed_at=observed)
+            post.comments = expanded.comments
+            if post.num_comments and not post.comments:
+                gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=subreddit, detail="fixture expansion returned no comments"))
+            count_gap = comment_count_gap(post)
+            if count_gap and not any(gap.entity_id == post.post_id and gap.reason == "unexpanded" for gap in gaps):
+                gaps.append(count_gap)
         record = _request_record("discover", "fixture", 200, None, None, {"subreddit": subreddit, "cursor": cursor}, billed=False)
-        return PageResult(posts, cursor, selected.get("after"), observed, f"fixture://{subreddit}/new", 200, "fixture", gaps=gaps, metadata={"comments_expanded": config.comments_mode != "off"}, request_records=[record])
+        return PageResult(posts, cursor, selected.get("after"), observed, f"fixture://{subreddit}/new", 200, "fixture", gaps=gaps, metadata={"comments_expanded": True}, request_records=[record])
 
     def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
         observed = utc_now()
@@ -289,14 +288,13 @@ class FixtureProvider:
                 gaps.append(Gap("post", "fixture_post_missing", entity_id=post.post_id, subreddit=post.subreddit))
                 continue
             refreshed_post = parse_post(raw, default_subreddit=post.subreddit, observed_at=observed)
-            if config.comments_mode != "off":
-                count_gap = comment_count_gap(refreshed_post)
-                if count_gap:
-                    gaps.append(count_gap)
+            count_gap = comment_count_gap(refreshed_post)
+            if count_gap:
+                gaps.append(count_gap)
             refreshed.append(refreshed_post)
         record = _request_record("refresh", "fixture", 200, None, None, {"post_count": len(posts)}, billed=False)
         observations = {post.post_id: record for post in refreshed}
-        return RefreshResult(refreshed, observed, "fixture", 200, gaps=gaps, metadata={"comments_expanded": config.comments_mode != "off"}, request_records=[record], observation_requests=observations)
+        return RefreshResult(refreshed, observed, "fixture", 200, gaps=gaps, metadata={"comments_expanded": True}, request_records=[record], observation_requests=observations)
 
 
 class HttpProviderBase:
@@ -332,12 +330,11 @@ class RedditApisProvider(HttpProviderBase):
         calls = discovery + refresh_batches
         discovered_capacity = discovery * config.listing_limit
         notes = ["Discovery estimate includes the configured maximum listing pages.", "Refresh uses documented batches of up to 100 t3_ fullnames."]
-        if config.comments_mode != "off":
-            notes.append("Comment request estimate uses the listing-limit upper bound for newly discovered posts.")
+        notes.append("Comment request estimate uses the listing-limit upper bound for newly discovered posts.")
         if config.comments_mode == "full":
             notes.append("Full comment expansion has unknown, unbounded pagination cost; review provider billing before live execution.")
             return Plan(self.name, discovery, refresh, None, None, "USD reads", notes)
-        request_count = calls + (discovered_capacity + refresh if config.comments_mode != "off" else 0)
+        request_count = calls + discovered_capacity + refresh
         return Plan(self.name, discovery, refresh, request_count, request_count * 0.002, "USD reads", notes)
 
     def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
@@ -355,15 +352,14 @@ class RedditApisProvider(HttpProviderBase):
         if blocked:
             gaps.append(Gap("listing", "blocked", subreddit=subreddit, detail=str(payload.get("blockReason"))))
         records = _request_records(self.client, "discover", request_id, response, cache_status, cache_observed_at, {"url": url, "subreddit": subreddit, "cursor": cursor}, billed=_billing(cache_status))
-        if config.comments_mode != "off":
-            for post in posts:
-                comments, comment_gaps, comment_records = self._fetch_comments(post, config, key)
-                existing = {comment.comment_id: comment for comment in post.comments}
-                existing.update({comment.comment_id: comment for comment in comments})
-                post.comments = list(existing.values())
-                gaps.extend(comment_gaps)
-                records.extend(comment_records)
-        return PageResult(posts, cursor, cursor if blocked else payload.get("after"), observed, url, response.status, request_id, cache_status, cache_observed_at, gaps, {"listing_status": payload.get("listing_status"), "exhausted_reason": payload.get("exhausted_reason"), "comments_expanded": config.comments_mode != "off", "blocked": blocked}, records)
+        for post in posts:
+            comments, comment_gaps, comment_records = self._fetch_comments(post, config, key)
+            existing = {comment.comment_id: comment for comment in post.comments}
+            existing.update({comment.comment_id: comment for comment in comments})
+            post.comments = list(existing.values())
+            gaps.extend(comment_gaps)
+            records.extend(comment_records)
+        return PageResult(posts, cursor, cursor if blocked else payload.get("after"), observed, url, response.status, request_id, cache_status, cache_observed_at, gaps, {"listing_status": payload.get("listing_status"), "exhausted_reason": payload.get("exhausted_reason"), "comments_expanded": True, "blocked": blocked}, records)
 
     def _fetch_comments(self, post: PostSnapshot, config: Config, key: str) -> tuple[list[Any], list[Gap], list[RequestRecord]]:
         comments: list[Any] = []
@@ -442,14 +438,13 @@ class RedditApisProvider(HttpProviderBase):
                 else:
                     refreshed = parse_post(raw, default_subreddit=post.subreddit, observed_at=utc_now(), include_comments=False)
                     observation_requests[post.post_id] = record
-                    if config.comments_mode != "off":
-                        comments, comment_gaps, comment_records = self._fetch_comments(refreshed, config, key)
-                        refreshed.comments = comments
-                        gaps.extend(comment_gaps)
-                        records.extend(comment_records)
+                    comments, comment_gaps, comment_records = self._fetch_comments(refreshed, config, key)
+                    refreshed.comments = comments
+                    gaps.extend(comment_gaps)
+                    records.extend(comment_records)
                     all_posts.append(refreshed)
         primary = next((record for record in records if record.operation == "refresh"), None)
-        return RefreshResult(all_posts, utc_now(), primary.request_id if primary else None, primary.response_status if primary else None, primary.cache_status if primary else None, primary.cache_observed_at if primary else None, gaps, {"batch_count": (len(posts) + 99) // 100, "comments_expanded": config.comments_mode != "off"}, records, observation_requests)
+        return RefreshResult(all_posts, utc_now(), primary.request_id if primary else None, primary.response_status if primary else None, primary.cache_status if primary else None, primary.cache_observed_at if primary else None, gaps, {"batch_count": (len(posts) + 99) // 100, "comments_expanded": True}, records, observation_requests)
 
 
 def _has_id(raw: Mapping[str, Any]) -> bool:
@@ -505,14 +500,14 @@ class FetchLayerProvider(HttpProviderBase):
             for post in posts:
                 post.comments = []
             gaps.extend(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=subreddit, detail="FetchLayer full comment expansion is unsupported") for post in posts)
-        elif config.comments_mode == "bounded":
+        else:
             for post in posts:
                 expansion = self._fetch_post(post, config, "comment_expansion", key)
                 records.extend(expansion.request_records)
                 gaps.extend(expansion.gaps)
                 if expansion.posts:
                     post.comments = expansion.posts[0].comments
-        return PageResult(posts, cursor, cursor if blocked else payload.get("nextPageUrl"), observed, payload.get("requestedUrl"), response.status, request_id, cache_status, cache_observed_at, gaps, {"pagesScraped": payload.get("pagesScraped"), "pagesRequested": payload.get("pagesRequested"), "comments_expanded": config.comments_mode == "bounded", "blocked": blocked}, records)
+        return PageResult(posts, cursor, cursor if blocked else payload.get("nextPageUrl"), observed, payload.get("requestedUrl"), response.status, request_id, cache_status, cache_observed_at, gaps, {"pagesScraped": payload.get("pagesScraped"), "pagesRequested": payload.get("pagesRequested"), "comments_expanded": True, "blocked": blocked}, records)
 
     def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
         refreshed: list[PostSnapshot] = []
@@ -561,7 +556,7 @@ class FetchLayerProvider(HttpProviderBase):
         result_gaps: list[Gap] = []
         if config.comments_mode == "full":
             result_gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="FetchLayer full comment expansion is unsupported"))
-        elif config.comments_mode != "off" and (response_payload.get("remainingMoreCommentsCount") or response_payload.get("listing_status") in {"truncated", "unknown"} or comment_count_gap(refreshed_post)):
+        elif response_payload.get("remainingMoreCommentsCount") or response_payload.get("listing_status") in {"truncated", "unknown"} or comment_count_gap(refreshed_post):
             gap = Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="provider returned additional or incomplete comments")
             result_gaps.append(gap)
         return RefreshResult([refreshed_post], utc_now(), request_id, response.status, cache_status, cache_observed_at, gaps=result_gaps, request_records=records, observation_requests={post.post_id: record})
