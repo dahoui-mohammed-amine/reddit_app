@@ -14,7 +14,7 @@ from reddit_ingestion.cli import main as cli_main
 from reddit_ingestion.comments import apply_comment_policy
 from reddit_ingestion.config import Config
 from reddit_ingestion.db import Database
-from reddit_ingestion.models import CommentSnapshot, Gap, PageResult, PostSnapshot, RefreshResult, RequestRecord
+from reddit_ingestion.models import CommentSnapshot, Gap, PageResult, PostSnapshot, ProviderStatus, RefreshResult, RequestRecord
 from reddit_ingestion.normalize import parse_comment, parse_post
 from reddit_ingestion.providers import FetchLayerProvider, FixtureProvider, JsonClient, HttpResponse, ProviderError, RedditApisProvider
 from reddit_ingestion.runner import check_live_access, plan_for, run_once
@@ -519,6 +519,18 @@ class IngestionTests(unittest.TestCase):
                 with self.assertRaises(ProviderError):
                     check_live_access(provider, allow_paid=False)
 
+    def test_run_once_requires_explicit_cost_consent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            try:
+                provider = RedditApisProvider(config(root, provider="redditapis"))
+                with self.assertRaisesRegex(ProviderError, "paid provider calls are disabled"):
+                    run_once(db, provider, config(root, provider="redditapis"), "discover")
+                self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0], 0)
+            finally:
+                db.close()
+
     def test_redditapis_bounded_comments_are_requested_and_audited(self) -> None:
         class Client:
             def __init__(self) -> None:
@@ -755,6 +767,9 @@ fixture_path = \"{FIXTURE}\"
         class FailedProvider:
             name = "redditapis"
 
+            def status(self) -> ProviderStatus:
+                return ProviderStatus("redditapis", True, True, "test provider", True)
+
             def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
                 raise ProviderError("service unavailable", status=503, retryable=True, billed=True, request_id="failed-request", url="https://provider.test/listing")
 
@@ -763,7 +778,7 @@ fixture_path = \"{FIXTURE}\"
 
         with tempfile.TemporaryDirectory() as directory:
             db = Database(Path(directory) / "db.sqlite3")
-            summary = run_once(db, FailedProvider(), config(Path(directory), provider="redditapis"), "discover")
+            summary = run_once(db, FailedProvider(), config(Path(directory), provider="redditapis"), "discover", allow_paid=True)
             self.assertEqual(summary.gaps, 3)
             self.assertIsNone(db.checkpoint("freelance"))
             request = db.connection.execute("SELECT request_id, response_status, billed FROM requests").fetchone()

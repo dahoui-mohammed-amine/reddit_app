@@ -10,7 +10,7 @@ from pathlib import Path
 from .config import load_config
 from .db import Database
 from .providers import ProviderError, make_provider
-from .runner import check_live_access, plan_for, render_plan, run_once
+from .runner import plan_for, render_plan, run_once
 
 
 def _existing_plan_state(path: Path, provider: str, subreddits: tuple[str, ...]) -> tuple[int, int]:
@@ -79,9 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         # The estimate is emitted before a live call. Full comments remain an
         # explicit mode in config and require the same paid-call confirmation.
         print(json.dumps({"status": "plan", "provider": asdict(status), "plan": json.loads(render_plan(plan))}, indent=2))
-        if provider.name != "fixture":
-            check_live_access(provider, allow_paid=args.allow_paid)
-        summary = run_once(db, provider, config, args.mode)
+        summary = run_once(db, provider, config, args.mode, allow_paid=args.allow_paid)
         print(json.dumps({"status": summary.status, **asdict(summary)}, indent=2))
         return 0
     except ProviderError as exc:

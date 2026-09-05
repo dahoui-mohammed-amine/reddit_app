@@ -38,9 +38,11 @@ def _request_units(records: list[RequestRecord], request_id: str | None) -> int:
     return 1 if request_id else 0
 
 
-def run_once(db: Database, provider: Provider, config: Config, mode: str) -> RunSummary:
+def run_once(db: Database, provider: Provider, config: Config, mode: str, *, allow_paid: bool = False) -> RunSummary:
     if mode not in {"run", "discover", "refresh"}:
         raise ValueError("mode must be run, discover, or refresh")
+    if provider.name != "fixture":
+        check_live_access(provider, allow_paid=allow_paid)
     started = utc_now()
     run_id = db.start_run(provider.name, mode, config_dict(config), started)
     summary = RunSummary(run_id)
