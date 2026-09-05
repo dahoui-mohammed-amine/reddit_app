@@ -67,6 +67,10 @@ def _removed(raw: Mapping[str, Any]) -> bool:
     return bool(any(markers)) or any(value in {"[removed]", "removed"} for value in contents)
 
 
+def _state_known(raw: Mapping[str, Any], marker_keys: tuple[str, ...], content_keys: tuple[str, ...], values: set[str]) -> bool:
+    return any(key in raw for key in marker_keys) or any(raw[key] in values for key in content_keys if key in raw)
+
+
 def post_id(raw: Mapping[str, Any]) -> str:
     value = _value(raw, "id", "post_id")
     if value:
@@ -105,6 +109,8 @@ def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed
         removed=_removed(raw),
         depth=_int(_value(raw, "depth")),
         observed_at=observed_at,
+        deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "text"), {"[deleted]", "deleted"}),
+        removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "text"), {"[removed]", "removed"}),
     )
 
 
@@ -137,6 +143,8 @@ def parse_post(
         deleted=_deleted(raw),
         removed=_removed(raw),
         observed_at=observed,
+        deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "selftext", "text"), {"[deleted]", "deleted"}),
+        removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "selftext"), {"[removed]", "removed"}),
     )
     if include_comments:
         comments = _value(raw, "comments")

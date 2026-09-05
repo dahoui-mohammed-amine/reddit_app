@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -13,10 +14,10 @@ from reddit_ingestion.cli import main as cli_main
 from reddit_ingestion.comments import apply_comment_policy
 from reddit_ingestion.config import Config
 from reddit_ingestion.db import Database
-from reddit_ingestion.models import CommentSnapshot, Gap, PageResult, PostSnapshot, RefreshResult
+from reddit_ingestion.models import CommentSnapshot, Gap, PageResult, PostSnapshot, RefreshResult, RequestRecord
 from reddit_ingestion.normalize import parse_comment, parse_post
 from reddit_ingestion.providers import FetchLayerProvider, FixtureProvider, JsonClient, HttpResponse, ProviderError, RedditApisProvider
-from reddit_ingestion.runner import check_live_access, run_once
+from reddit_ingestion.runner import check_live_access, plan_for, run_once
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample.json"
@@ -208,6 +209,109 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(db.connection.execute("SELECT reason FROM gaps").fetchone()[0], "truncated")
             db.close()
 
+    def test_provider_truncation_stops_followup_pages(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str | None]] = []
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                self.calls.append((subreddit, cursor))
+                if cursor is not None:
+                    raise AssertionError("truncated pages must stop pagination")
+                return PageResult(
+                    [],
+                    cursor,
+                    "next",
+                    "2026-09-05T00:00:00Z",
+                    "fixture://truncated",
+                    200,
+                    "request",
+                    metadata={"listing_status": "truncated"},
+                    request_records=[RequestRecord("request", "discover", 200)],
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            provider = Provider()
+            cfg = replace(config(root), subreddits=("freelance",), max_discovery_pages=2)
+            run_once(db, provider, cfg, "discover")
+            self.assertEqual(provider.calls, [("freelance", None)])
+            self.assertIsNone(db.checkpoint("freelance"))
+            db.close()
+
+    def test_partial_snapshot_preserves_deletion_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            deleted = parse_post({"id": "p", "title": "gone", "selftext": "[deleted]"}, default_subreddit="freelance", observed_at=observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([deleted], None, None, observed, "fixture://p", 200, "fixture"))
+            partial = parse_post({"id": "p", "score": 5, "num_comments": 0}, default_subreddit="freelance", observed_at=observed)
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", RefreshResult([partial], observed, "refresh", 200))
+            row = db.connection.execute("SELECT deleted, score FROM posts WHERE post_id='p'").fetchone()
+            self.assertEqual(tuple(row), (1, 5))
+            self.assertEqual(db.purge_deleted_content(), 1)
+            cleared = parse_post({"id": "p", "deleted": False, "score": 6, "num_comments": 0}, default_subreddit="freelance", observed_at=observed)
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", RefreshResult([cleared], observed, "refresh", 200))
+            self.assertEqual(db.connection.execute("SELECT deleted, score FROM posts WHERE post_id='p'").fetchone()[0:2], (0, 6))
+            self.assertEqual(db.purge_deleted_content(), 0)
+            db.close()
+
+    def test_cache_observation_timestamp_is_persisted_on_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("redditapis", "discover", {}, observed)
+            record = RequestRecord("request", "discover", 200, "cached", "2026-09-05T00:00:01Z", False)
+            page = PageResult([], None, None, observed, "https://provider.test", 200, "request", request_records=[record])
+            with db.transaction():
+                db.save_page(run_id, "redditapis", "freelance", page)
+            timestamp = db.connection.execute("SELECT cache_observed_at FROM requests WHERE request_id='request'").fetchone()[0]
+            self.assertEqual(timestamp, "2026-09-05T00:00:01Z")
+            db.close()
+
+    def test_bounded_policy_clears_stale_expansion_metadata(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                post = PostSnapshot(
+                    "p",
+                    "t3_p",
+                    subreddit,
+                    num_comments=1,
+                    observed_at="2026-09-05T00:00:00Z",
+                    comments=[CommentSnapshot("c", "t1_c", "p", depth=2, observed_at="2026-09-05T00:00:00Z")],
+                )
+                return PageResult(
+                    [post],
+                    cursor,
+                    None,
+                    post.observed_at,
+                    "fixture://p",
+                    200,
+                    "request",
+                    metadata={"comments_expanded": True},
+                    request_records=[RequestRecord("request", "discover", 200)],
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root), subreddits=("freelance",))
+            run_once(db, Provider(), cfg, "discover")
+            metadata = json.loads(db.connection.execute("SELECT metadata_json FROM post_observations").fetchone()[0])
+            self.assertFalse(metadata["comments_expanded"])
+            db.close()
+
     def test_full_comment_cursor_cycle_stops_before_repeating_request(self) -> None:
         class Client:
             def __init__(self) -> None:
@@ -229,6 +333,46 @@ class IngestionTests(unittest.TestCase):
             result = RedditApisProvider(cfg, client=client).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
             self.assertEqual(len([url for url in client.urls if "/comments" in url]), 3)
             self.assertEqual(len(result.posts[0].comments), 3)
+            self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
+
+    def test_duplicate_full_comment_pages_are_counted_once(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 2}]}, HttpResponse(200, {}, b""), "post-request"
+                comment = {"id": "c1", "name": "t1_c1", "body": "one"}
+                if "after=A" in url:
+                    return {"comments": [comment]}, HttpResponse(200, {}, b""), "comment-request-second"
+                return {"comments": [comment], "after": "A"}, HttpResponse(200, {}, b""), "comment-request-first"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis", comments="full")
+            result = RedditApisProvider(cfg, client=Client()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertEqual(len(result.posts[0].comments), 1)
+            self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
+
+    def test_missing_comment_collection_is_an_unexpanded_gap(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p"}]}, HttpResponse(200, {}, b""), "post-request"
+                return {}, HttpResponse(200, {}, b""), "comment-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis")
+            result = RedditApisProvider(cfg, client=Client()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
+
+    def test_fetchlayer_missing_comment_collection_is_an_unexpanded_gap(self) -> None:
+        class Client:
+            def request(self, *args: object, **kwargs: object) -> tuple[dict[str, object], HttpResponse, str]:
+                return {"id": "p", "name": "t3_p"}, HttpResponse(200, {}, b""), "refresh-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="fetchlayer")
+            result = FetchLayerProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "freelance", permalink="/r/freelance/comments/p/post/")], cfg
+            )
             self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
 
     def test_deletion_clears_mutable_content_but_retains_identity(self) -> None:
@@ -277,6 +421,37 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(len(refresh_records), 2)
             self.assertEqual([record.metadata["attempt"] for record in refresh_records], [1, 2])
             self.assertEqual([record.metadata["attempt_count"] for record in refresh_records], [2, 2])
+
+    def test_failed_discovery_persists_each_retry_attempt(self) -> None:
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            return HttpResponse(503, {}, b'{"error":"temporary"}')
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root, provider="redditapis"), subreddits=("freelance",))
+            client = JsonClient(timeout=1, retries=2, transport=transport, sleep=lambda _: None)
+            summary = run_once(db, RedditApisProvider(cfg, client=client), cfg, "discover")
+            records = db.connection.execute("SELECT metadata_json FROM requests ORDER BY request_event_id").fetchall()
+            self.assertEqual(summary.requests, 3)
+            self.assertEqual(len(records), 3)
+            self.assertEqual([json.loads(row[0])["attempt"] for row in records], [1, 2, 3])
+            db.close()
+
+    def test_resume_plan_includes_newest_page_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root, provider="redditapis"), subreddits=("freelance",), max_discovery_pages=2)
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("redditapis", "discover", {}, observed)
+            page = PageResult([], None, "saved-cursor", observed, "https://provider.test", 200, "request")
+            with db.transaction():
+                db.save_page(run_id, "redditapis", "freelance", page)
+            plan = plan_for(db, RedditApisProvider(cfg), cfg)
+            self.assertEqual(plan.discovery_requests, 3)
+            self.assertEqual(plan.estimated_requests, 909)
+            db.close()
 
     def test_full_redditapis_plan_does_not_claim_bounded_comment_cost(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
@@ -383,6 +558,23 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(summary.requests, 3)
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM requests").fetchone()[0], 3)
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='provider_error'").fetchone()[0], 3)
+            db.close()
+
+    def test_missing_discovery_collection_is_audited_without_checkpoint(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                return {"after": "next"}, HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root, provider="redditapis"), subreddits=("freelance",))
+            summary = run_once(db, RedditApisProvider(cfg, client=Client()), cfg, "discover")
+            self.assertEqual(summary.gaps, 1)
+            self.assertEqual(summary.requests, 1)
+            self.assertIsNone(db.checkpoint("freelance"))
+            gap = db.connection.execute("SELECT entity_type, reason FROM gaps").fetchone()
+            self.assertEqual(tuple(gap), ("listing", "provider_error"))
             db.close()
 
     def test_malformed_comment_is_audited_and_expansion_metadata_stays_false(self) -> None:

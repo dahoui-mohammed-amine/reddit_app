@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS requests (
     response_status INTEGER,
     billed INTEGER,
     cache_status TEXT,
+    cache_observed_at TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -125,29 +126,33 @@ class Database:
 
     def _migrate_requests(self) -> None:
         columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(requests)")}
-        if "request_event_id" in columns:
-            return
-        self.connection.execute("ALTER TABLE requests RENAME TO requests_legacy")
-        self.connection.execute(
-            """CREATE TABLE requests (
-            request_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request_id TEXT NOT NULL,
-            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-            provider TEXT NOT NULL,
-            operation TEXT NOT NULL,
-            requested_at TEXT NOT NULL,
-            response_status INTEGER,
-            billed INTEGER,
-            cache_status TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{}'
-            )"""
-        )
-        self.connection.execute(
-            """INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, metadata_json)
-            SELECT request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, metadata_json
-            FROM requests_legacy"""
-        )
-        self.connection.execute("DROP TABLE requests_legacy")
+        if "request_event_id" not in columns:
+            self.connection.execute("ALTER TABLE requests RENAME TO requests_legacy")
+            self.connection.execute(
+                """CREATE TABLE requests (
+                request_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL,
+                run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                response_status INTEGER,
+                billed INTEGER,
+                cache_status TEXT,
+                cache_observed_at TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+                )"""
+            )
+            cache_timestamp = "cache_observed_at" if "cache_observed_at" in columns else "NULL"
+            self.connection.execute(
+                f"""INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, cache_observed_at, metadata_json)
+                SELECT request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, {cache_timestamp}, metadata_json
+                FROM requests_legacy"""
+            )
+            self.connection.execute("DROP TABLE requests_legacy")
+            columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(requests)")}
+        if "cache_observed_at" not in columns:
+            self.connection.execute("ALTER TABLE requests ADD COLUMN cache_observed_at TEXT")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -190,13 +195,13 @@ class Database:
         for gap in page.gaps:
             self._save_gap(run_id, provider, gap, page.observed_at, subreddit=subreddit)
         blocked = page.metadata.get("blocked") or any(gap.entity_type == "listing" and gap.reason == "blocked" for gap in page.gaps)
-        provider_incomplete = listing_status in {"truncated", "unknown"}
+        provider_incomplete = listing_status in {"truncated", "unknown"} or page.metadata.get("checkpoint_deferred")
         if not page.metadata.get("request_failed") and not page.metadata.get("checkpoint_deferred") and not blocked and not provider_incomplete:
             self.connection.execute(
                 "INSERT INTO checkpoints(subreddit, cursor, page_count, observed_at, provider, source_url) VALUES (?, ?, 1, ?, ?, ?) ON CONFLICT(subreddit) DO UPDATE SET cursor=excluded.cursor, page_count=checkpoints.page_count+1, observed_at=excluded.observed_at, provider=excluded.provider, source_url=excluded.source_url",
                 (subreddit, page.next_cursor, page.observed_at, provider, page.source_url),
             )
-        self._save_request_records(run_id, provider, page.request_records, "discover", page.request_id, page.response_status, page.cache_status, page.metadata)
+        self._save_request_records(run_id, provider, page.request_records, "discover", page.request_id, page.response_status, page.cache_status, page.cache_observed_at, page.metadata)
         return len(page.posts), sum(len(post.comments) for post in page.posts)
 
     def save_refresh(self, run_id: str, provider: str, result: RefreshResult) -> tuple[int, int]:
@@ -211,7 +216,7 @@ class Database:
                     result.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
         for gap in result.gaps:
             self._save_gap(run_id, provider, gap, result.observed_at)
-        self._save_request_records(run_id, provider, result.request_records, "refresh", result.request_id, result.response_status, result.cache_status, result.metadata)
+        self._save_request_records(run_id, provider, result.request_records, "refresh", result.request_id, result.response_status, result.cache_status, result.cache_observed_at, result.metadata)
         return len(result.posts), sum(len(post.comments) for post in result.posts)
 
     def _save_post(self, post: PostSnapshot, provider: str) -> None:
@@ -220,10 +225,18 @@ class Database:
         title = None if deleted or removed else post.title
         body = None if deleted or removed else post.body
         author = None if deleted or removed else post.author
+        deleted_update = "deleted=excluded.deleted" if post.deletion_known or post.deleted else "deleted=posts.deleted"
+        removed_update = "removed=excluded.removed" if post.removal_known or post.removed else "removed=posts.removed"
+        clear_post_content = ["excluded.deleted", "excluded.removed"]
+        if not post.deletion_known:
+            clear_post_content.append("posts.deleted")
+        if not post.removal_known:
+            clear_post_content.append("posts.removed")
+        clear_post_content = " OR ".join(clear_post_content)
         self.connection.execute(
-            """INSERT INTO posts(post_id, fullname, subreddit, title, body, author, permalink, url, created_at, score, ups, upvote_ratio, num_comments, archived, locked, deleted, removed, observed_at, provider, updated_at)
+            f"""INSERT INTO posts(post_id, fullname, subreddit, title, body, author, permalink, url, created_at, score, ups, upvote_ratio, num_comments, archived, locked, deleted, removed, observed_at, provider, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN excluded.deleted OR excluded.removed THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN excluded.deleted OR excluded.removed THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN excluded.deleted OR excluded.removed THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(excluded.created_at, posts.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), archived=excluded.archived, locked=excluded.locked, deleted=excluded.deleted, removed=excluded.removed, observed_at=excluded.observed_at, provider=excluded.provider, updated_at=excluded.updated_at""",
+            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(excluded.created_at, posts.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), archived=excluded.archived, locked=excluded.locked, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, provider=excluded.provider, updated_at=excluded.updated_at""",
             (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, provider, post.observed_at),
         )
 
@@ -243,10 +256,18 @@ class Database:
         removed = int(comment.removed)
         body = None if deleted or removed else comment.body
         author = None if deleted or removed else comment.author
+        deleted_update = "deleted=excluded.deleted" if comment.deletion_known or comment.deleted else "deleted=comments.deleted"
+        removed_update = "removed=excluded.removed" if comment.removal_known or comment.removed else "removed=comments.removed"
+        clear_comment_content = ["excluded.deleted", "excluded.removed"]
+        if not comment.deletion_known:
+            clear_comment_content.append("comments.deleted")
+        if not comment.removal_known:
+            clear_comment_content.append("comments.removed")
+        clear_comment_content = " OR ".join(clear_comment_content)
         self.connection.execute(
-            """INSERT INTO comments(comment_id, fullname, post_id, parent_id, author, body, permalink, created_at, score, ups, depth, deleted, removed, observed_at, provider, updated_at)
+            f"""INSERT INTO comments(comment_id, fullname, post_id, parent_id, author, body, permalink, created_at, score, ups, depth, deleted, removed, observed_at, provider, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(comment_id) DO UPDATE SET fullname=excluded.fullname, post_id=excluded.post_id, parent_id=COALESCE(excluded.parent_id, comments.parent_id), author=CASE WHEN excluded.deleted OR excluded.removed THEN NULL ELSE COALESCE(excluded.author, comments.author) END, body=CASE WHEN excluded.deleted OR excluded.removed THEN NULL ELSE COALESCE(excluded.body, comments.body) END, permalink=COALESCE(excluded.permalink, comments.permalink), created_at=COALESCE(excluded.created_at, comments.created_at), score=COALESCE(excluded.score, comments.score), ups=COALESCE(excluded.ups, comments.ups), depth=COALESCE(excluded.depth, comments.depth), deleted=excluded.deleted, removed=excluded.removed, observed_at=excluded.observed_at, provider=excluded.provider, updated_at=excluded.updated_at""",
+            ON CONFLICT(comment_id) DO UPDATE SET fullname=excluded.fullname, post_id=excluded.post_id, parent_id=COALESCE(excluded.parent_id, comments.parent_id), author=CASE WHEN {clear_comment_content} THEN NULL ELSE COALESCE(excluded.author, comments.author) END, body=CASE WHEN {clear_comment_content} THEN NULL ELSE COALESCE(excluded.body, comments.body) END, permalink=COALESCE(excluded.permalink, comments.permalink), created_at=COALESCE(excluded.created_at, comments.created_at), score=COALESCE(excluded.score, comments.score), ups=COALESCE(excluded.ups, comments.ups), depth=COALESCE(excluded.depth, comments.depth), {deleted_update}, {removed_update}, observed_at=excluded.observed_at, provider=excluded.provider, updated_at=excluded.updated_at""",
             (comment.comment_id, comment.fullname or f"t1_{comment.comment_id}", post_id, comment.parent_id, author, body, comment.permalink, comment.created_at, comment.score, comment.ups, comment.depth, deleted, removed, comment.observed_at, provider, comment.observed_at),
         )
 
@@ -262,13 +283,14 @@ class Database:
         request_id: str | None,
         status: int | None,
         cache_status: str | None,
+        cache_observed_at: str | None,
         metadata: dict[str, Any],
     ) -> None:
         if records:
             for record in records:
-                self._save_request(run_id, provider, record.operation, record.request_id, record.response_status, record.cache_status, record.metadata, record.billed, record.request_units)
+                self._save_request(run_id, provider, record.operation, record.request_id, record.response_status, record.cache_status, record.cache_observed_at, record.metadata, record.billed, record.request_units)
         elif request_id is not None:
-            self._save_request(run_id, provider, operation, request_id, status, cache_status, metadata)
+            self._save_request(run_id, provider, operation, request_id, status, cache_status, cache_observed_at, metadata)
 
     def _save_request(
         self,
@@ -278,6 +300,7 @@ class Database:
         request_id: str | None,
         status: int | None,
         cache_status: str | None,
+        cache_observed_at: str | None,
         metadata: dict[str, Any],
         billed: bool | None = None,
         request_units: int = 1,
@@ -287,7 +310,7 @@ class Database:
         request_metadata.setdefault("request_units", max(1, request_units))
         if billed is None:
             billed = False if provider == "fixture" else False if cache_status == "cached" else None
-        self.connection.execute("INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, metadata_json) VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)", (request_id, run_id, provider, operation, status, None if billed is None else int(billed), cache_status, json.dumps(request_metadata, sort_keys=True)))
+        self.connection.execute("INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)", (request_id, run_id, provider, operation, status, None if billed is None else int(billed), cache_status, cache_observed_at, json.dumps(request_metadata, sort_keys=True)))
 
     def due_posts(self, interval_minutes: int, limit: int) -> list[PostSnapshot]:
         rows = self.connection.execute("SELECT * FROM posts WHERE datetime(observed_at) <= datetime('now', ?) ORDER BY observed_at ASC LIMIT ?", (f"-{interval_minutes} minutes", limit)).fetchall()

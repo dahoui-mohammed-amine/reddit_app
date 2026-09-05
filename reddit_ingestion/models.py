@@ -20,6 +20,8 @@ class CommentSnapshot:
     removed: bool = False
     depth: int | None = None
     observed_at: str = ""
+    deletion_known: bool = False
+    removal_known: bool = False
 
 
 @dataclass(slots=True)
@@ -43,6 +45,8 @@ class PostSnapshot:
     removed: bool = False
     observed_at: str = ""
     comments: list[CommentSnapshot] = field(default_factory=list)
+    deletion_known: bool = False
+    removal_known: bool = False
 
 
 @dataclass(slots=True)

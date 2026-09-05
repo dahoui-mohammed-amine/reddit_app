@@ -13,18 +13,26 @@ from .providers import ProviderError, make_provider
 from .runner import check_live_access, plan_for, render_plan, run_once
 
 
-def _existing_post_count(path: Path) -> int:
+def _existing_plan_state(path: Path, provider: str, subreddits: tuple[str, ...]) -> tuple[int, int]:
     if not path.is_file():
-        return 0
+        return 0, 0
     try:
         connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     except sqlite3.Error:
-        return 0
+        return 0, 0
     try:
         try:
-            return int(connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0])
+            known_posts = int(connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0])
+            placeholders = ",".join("?" for _ in subreddits)
+            resume_pages = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM checkpoints WHERE provider = ? AND cursor IS NOT NULL AND subreddit IN ({placeholders})",
+                    (provider, *subreddits),
+                ).fetchone()[0]
+            )
+            return known_posts, resume_pages
         except sqlite3.Error:
-            return 0
+            return 0, 0
     finally:
         connection.close()
 
@@ -52,7 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         status = provider.status()
         if args.dry_run:
-            plan = provider.plan(config, _existing_post_count(config.database_path))
+            known_posts, resume_pages = _existing_plan_state(config.database_path, provider.name, config.subreddits)
+            plan = provider.plan(config, known_posts, resume_pages=resume_pages)
             print(json.dumps({"status": "dry_run", "provider": asdict(status), "database": str(config.database_path), "plan": json.loads(render_plan(plan))}, indent=2))
             return 0
         db = Database(config.database_path)

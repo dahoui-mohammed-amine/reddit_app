@@ -22,7 +22,14 @@ def config_dict(config: Config) -> dict[str, Any]:
 
 def plan_for(db: Database, provider: Provider, config: Config) -> Plan:
     known = db.counts()["posts"]
-    return provider.plan(config, known)
+    resume_pages = sum(
+        1
+        for subreddit in config.subreddits
+        if (checkpoint := db.checkpoint(subreddit))
+        and checkpoint["provider"] == provider.name
+        and checkpoint["cursor"]
+    )
+    return provider.plan(config, known, resume_pages=resume_pages)
 
 
 def _request_units(records: list[RequestRecord], request_id: str | None) -> int:
@@ -37,6 +44,19 @@ def _failure_record(operation: str, error: ProviderError) -> list[RequestRecord]
     metadata = {"error": str(error)}
     if error.url:
         metadata["url"] = error.url
+    if error.attempts:
+        return [
+            RequestRecord(
+                error.request_id,
+                operation,
+                attempt.status,
+                "unknown",
+                None,
+                attempt.billed,
+                {**metadata, "attempt": index, "attempt_count": len(error.attempts)},
+            )
+            for index, attempt in enumerate(error.attempts, start=1)
+        ]
     return [RequestRecord(error.request_id, operation, error.status, "unknown", None, error.billed, metadata)]
 
 
@@ -79,11 +99,16 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str) -> Run
                         summary.requests += _request_units(page.request_records, page.request_id)
                         break
                     page.gaps.extend(apply_comment_policy(page.posts, config))
+                    if any(gap.entity_type == "comment" for gap in page.gaps):
+                        page.metadata["comments_expanded"] = False
                     if resume_cursor and page_number == 0:
                         page.metadata["checkpoint_deferred"] = True
                     blocked = page.metadata.get("blocked") or any(gap.entity_type == "listing" and gap.reason == "blocked" for gap in page.gaps)
+                    provider_incomplete = page.metadata.get("listing_status") in {"truncated", "unknown"} or any(gap.entity_type == "listing" and gap.reason == "truncated" for gap in page.gaps)
+                    if provider_incomplete:
+                        page.metadata["checkpoint_deferred"] = True
                     at_page_cap = resumed_page_number >= config.max_discovery_pages - 1
-                    if page.next_cursor and at_page_cap and not blocked and not any(gap.entity_type == "listing" and gap.reason == "truncated" for gap in page.gaps):
+                    if page.next_cursor and at_page_cap and not blocked and not page.metadata.get("request_failed") and not provider_incomplete:
                         page.gaps.append(Gap("listing", "truncated", subreddit=subreddit, detail=f"max_discovery_pages={config.max_discovery_pages}"))
                     with db.transaction():
                         discovered, comments = db.save_page(run_id, provider.name, subreddit, page)
@@ -91,7 +116,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str) -> Run
                     summary.comments += comments
                     summary.gaps += len(page.gaps)
                     summary.requests += _request_units(page.request_records, page.request_id)
-                    if blocked:
+                    if blocked or provider_incomplete:
                         break
                     if resume_cursor and page_number == 0:
                         cursor = resume_cursor
@@ -116,6 +141,8 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str) -> Run
                         request_records=_failure_record("refresh", exc),
                     )
                 result.gaps.extend(apply_comment_policy(result.posts, config))
+                if any(gap.entity_type == "comment" for gap in result.gaps):
+                    result.metadata["comments_expanded"] = False
                 with db.transaction():
                     refreshed, comments = db.save_refresh(run_id, provider.name, result)
                 summary.refreshed += refreshed
