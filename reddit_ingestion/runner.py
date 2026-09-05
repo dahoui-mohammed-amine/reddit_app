@@ -31,12 +31,18 @@ def _parse_refresh_time(value: str) -> datetime | None:
             return None
 
 
-def _apply_refresh_expiry(posts: list[PostSnapshot], config: Config) -> None:
+def _apply_refresh_expiry(
+    posts: list[PostSnapshot],
+    config: Config,
+    source_created_at: dict[str, str | None] | None = None,
+) -> None:
+    source_created_at = source_created_at or {}
     for post in posts:
         if post.refresh_until:
             continue
-        if post.created_at:
-            observed = _parse_refresh_time(post.created_at)
+        source_time = post.created_at or source_created_at.get(post.post_id)
+        if source_time:
+            observed = _parse_refresh_time(source_time)
         else:
             observed = _parse_refresh_time(post.observed_at) if post.observed_at else None
         if observed is None:
@@ -153,7 +159,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                 result.gaps.extend(apply_comment_policy(result.posts, config))
                 if any(gap.entity_type == "comment" for gap in result.gaps):
                     result.metadata["comments_expanded"] = False
-                _apply_refresh_expiry(result.posts, config)
+                _apply_refresh_expiry(result.posts, config, {post.post_id: post.created_at for post in due})
                 with db.transaction():
                     refreshed, comments = db.save_refresh(run_id, provider.name, result)
                 summary.refreshed += refreshed

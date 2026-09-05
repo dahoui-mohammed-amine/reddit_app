@@ -218,7 +218,13 @@ class Database:
         self._defer_omitted_full_comments(result)
         for post in result.posts:
             self._save_post(post, provider)
-            self._save_observation(post, provider, result, result.observation_requests.get(post.post_id))
+            metadata = dict(result.metadata)
+            if "comments_expanded" in metadata:
+                metadata["comments_expanded"] = not any(
+                    gap.entity_type == "comment" and (gap.entity_id is None or gap.entity_id == post.post_id)
+                    for gap in result.gaps
+                )
+            self._save_observation(post, provider, result, result.observation_requests.get(post.post_id), metadata)
             if post.deleted or post.removed:
                 result.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
             for comment in post.comments:
@@ -231,9 +237,14 @@ class Database:
         return len(result.posts), sum(len(post.comments) for post in result.posts)
 
     def _defer_omitted_full_comments(self, result: RefreshResult) -> None:
-        if result.metadata.get("comments_mode") != "full" or result.metadata.get("comments_expanded") is False:
+        if result.metadata.get("comments_mode") != "full":
             return
         for post in result.posts:
+            if any(
+                gap.entity_type == "comment" and (gap.entity_id is None or gap.entity_id == post.post_id)
+                for gap in result.gaps
+            ):
+                continue
             known_ids = {
                 row[0]
                 for row in self.connection.execute("SELECT comment_id FROM comments WHERE post_id = ?", (post.post_id,))
@@ -274,12 +285,20 @@ class Database:
             (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, post.refresh_until, provider, post.observed_at),
         )
 
-    def _save_observation(self, post: PostSnapshot, provider: str, result: PageResult | RefreshResult, request: RequestRecord | None = None) -> None:
+    def _save_observation(
+        self,
+        post: PostSnapshot,
+        provider: str,
+        result: PageResult | RefreshResult,
+        request: RequestRecord | None = None,
+        result_metadata: dict[str, Any] | None = None,
+    ) -> None:
         response_status = request.response_status if request else result.response_status
         request_id = request.request_id if request else result.request_id
         cache_status = request.cache_status if request else result.cache_status
         cache_observed_at = request.cache_observed_at if request else result.cache_observed_at
-        metadata = {**request.metadata, **result.metadata} if request else result.metadata
+        result_metadata = result.metadata if result_metadata is None else result_metadata
+        metadata = {**request.metadata, **result_metadata} if request else result_metadata
         self.connection.execute(
             "INSERT INTO post_observations(post_id, observed_at, provider, source_created_at, score, ups, upvote_ratio, num_comments, response_status, request_id, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (post.post_id, post.observed_at, provider, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, response_status, request_id, cache_status, cache_observed_at, json.dumps(metadata, sort_keys=True)),

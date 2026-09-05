@@ -216,6 +216,33 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(refresh_until, "1970-01-31T00:00:00Z")
             db.close()
 
+    def test_refresh_expiry_preserves_stored_source_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            source_time = "2026-09-01T00:00:00Z"
+            observed = "2026-09-06T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, source_time)
+            with db.transaction():
+                db.save_page(
+                    run_id,
+                    "fixture",
+                    "freelance",
+                    PageResult([PostSnapshot("p", "t3_p", "freelance", created_at=source_time, observed_at=source_time)], None, None, source_time, "fixture://p", 200, "fixture"),
+                )
+
+            class Provider:
+                name = "fixture"
+
+                def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
+                    return RefreshResult([PostSnapshot("p", "t3_p", "freelance", observed_at=observed)], observed, "refresh", 200)
+
+            cfg = replace(config(root), subreddits=("freelance",), refresh_expiry_days=30)
+            run_once(db, Provider(), cfg, "refresh")
+            refresh_until = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='p'").fetchone()[0]
+            self.assertEqual(refresh_until, "2026-10-01T00:00:00Z")
+            db.close()
+
     def test_partial_comment_results_do_not_delete_existing_comments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -297,6 +324,45 @@ class IngestionTests(unittest.TestCase):
             self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "unexpanded" for gap in result.gaps))
             metadata = json.loads(db.connection.execute("SELECT metadata_json FROM post_observations ORDER BY observation_id DESC LIMIT 1").fetchone()[0])
             self.assertFalse(metadata["comments_expanded"])
+            db.close()
+
+    def test_full_refresh_tracks_comment_completeness_per_post(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            initial = PostSnapshot(
+                "p1",
+                "t3_p1",
+                "freelance",
+                observed_at=observed,
+                comments=[CommentSnapshot("c1", "t1_c1", "p1", observed_at=observed)],
+            )
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([initial], None, None, observed, "fixture://p1", 200, "fixture"))
+            result = RefreshResult(
+                [
+                    PostSnapshot("p1", "t3_p1", "freelance", observed_at=observed, comments=[]),
+                    PostSnapshot("p2", "t3_p2", "freelance", observed_at=observed, comments=[]),
+                ],
+                observed,
+                "refresh",
+                200,
+                gaps=[Gap("comment", "malformed", entity_id="p2", subreddit="freelance")],
+                metadata={"comments_mode": "full", "comments_expanded": False},
+            )
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", result)
+            self.assertTrue(any(gap.entity_id == "p1" and gap.reason == "unexpanded" for gap in result.gaps))
+            metadata = {
+                row[0]: json.loads(row[1])
+                for row in db.connection.execute(
+                    "SELECT post_id, metadata_json FROM post_observations WHERE post_id IN ('p1', 'p2') ORDER BY observation_id"
+                )
+            }
+            self.assertFalse(metadata["p1"]["comments_expanded"])
+            self.assertFalse(metadata["p2"]["comments_expanded"])
             db.close()
 
     def test_blocked_listing_records_gap_without_advancing_checkpoint(self) -> None:
