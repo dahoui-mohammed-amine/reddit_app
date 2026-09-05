@@ -190,7 +190,8 @@ class Database:
         for gap in page.gaps:
             self._save_gap(run_id, provider, gap, page.observed_at, subreddit=subreddit)
         blocked = page.metadata.get("blocked") or any(gap.entity_type == "listing" and gap.reason == "blocked" for gap in page.gaps)
-        if not page.metadata.get("request_failed") and not page.metadata.get("checkpoint_deferred") and not blocked:
+        provider_incomplete = listing_status in {"truncated", "unknown"}
+        if not page.metadata.get("request_failed") and not page.metadata.get("checkpoint_deferred") and not blocked and not provider_incomplete:
             self.connection.execute(
                 "INSERT INTO checkpoints(subreddit, cursor, page_count, observed_at, provider, source_url) VALUES (?, ?, 1, ?, ?, ?) ON CONFLICT(subreddit) DO UPDATE SET cursor=excluded.cursor, page_count=checkpoints.page_count+1, observed_at=excluded.observed_at, provider=excluded.provider, source_url=excluded.source_url",
                 (subreddit, page.next_cursor, page.observed_at, provider, page.source_url),

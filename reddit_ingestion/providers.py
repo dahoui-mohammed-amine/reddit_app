@@ -507,7 +507,7 @@ class FetchLayerProvider(HttpProviderBase):
                 gaps.extend(expansion.gaps)
                 if expansion.posts:
                     post.comments = expansion.posts[0].comments
-        return PageResult(posts, cursor, cursor if blocked else payload.get("nextPageUrl"), observed, payload.get("requestedUrl"), response.status, request_id, cache_status, cache_observed_at, gaps, {"pagesScraped": payload.get("pagesScraped"), "pagesRequested": payload.get("pagesRequested"), "comments_expanded": True, "blocked": blocked}, records)
+        return PageResult(posts, cursor, cursor if blocked else payload.get("nextPageUrl"), observed, payload.get("requestedUrl"), response.status, request_id, cache_status, cache_observed_at, gaps, {"pagesScraped": payload.get("pagesScraped"), "pagesRequested": payload.get("pagesRequested"), "listing_status": payload.get("listing_status"), "comments_expanded": config.comments_mode == "bounded", "blocked": blocked}, records)
 
     def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
         refreshed: list[PostSnapshot] = []

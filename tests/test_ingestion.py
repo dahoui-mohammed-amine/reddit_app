@@ -174,6 +174,28 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='blocked'").fetchone()[0], 3)
             db.close()
 
+    def test_provider_truncation_records_gap_without_advancing_checkpoint(self) -> None:
+        observed = "2026-09-05T00:00:00Z"
+        page = PageResult(
+            [],
+            "c1",
+            "c2",
+            observed,
+            "fixture://truncated",
+            200,
+            "fixture-request",
+            metadata={"listing_status": "truncated"},
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "db.sqlite3")
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", page)
+            self.assertIsNone(db.checkpoint("freelance"))
+            self.assertEqual(db.connection.execute("SELECT reason FROM gaps").fetchone()[0], "truncated")
+            db.close()
+
     def test_deletion_clears_mutable_content_but_retains_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Database(Path(directory) / "db.sqlite3")
