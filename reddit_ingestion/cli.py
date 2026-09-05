@@ -31,9 +31,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "configuration_error", "error": str(exc)}, indent=2), file=sys.stderr)
         return 2
 
-    db = Database(config.database_path)
+    db: Database | None = None
     try:
         status = provider.status()
+        if args.dry_run:
+            plan = provider.plan(config, 0)
+            print(json.dumps({"status": "dry_run", "provider": asdict(status), "database": str(config.database_path), "plan": json.loads(render_plan(plan))}, indent=2))
+            return 0
+        db = Database(config.database_path)
         plan = plan_for(db, provider, config)
         if args.command == "status":
             print(json.dumps({"provider": asdict(status), "database": str(config.database_path), "counts": db.counts(), "subreddits": list(config.subreddits)}, indent=2))
@@ -44,9 +49,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "purge":
             purged = db.purge_deleted_content()
             print(json.dumps({"status": "purged", "posts_cleared": purged}, indent=2))
-            return 0
-        if args.dry_run:
-            print(json.dumps({"status": "dry_run", "provider": asdict(status), "plan": json.loads(render_plan(plan))}, indent=2))
             return 0
         # The estimate is emitted before a live call. Full comments remain an
         # explicit mode in config and require the same paid-call confirmation.
@@ -63,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "run_error", "error": str(exc)}, indent=2), file=sys.stderr)
         return 1
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 if __name__ == "__main__":

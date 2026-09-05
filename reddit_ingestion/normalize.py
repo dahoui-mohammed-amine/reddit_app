@@ -55,15 +55,16 @@ def _relative_permalink(value: str | None) -> str | None:
 
 
 def _deleted(raw: Mapping[str, Any]) -> bool:
-    author = _value(raw, "author", "author_username")
-    marker = _value(raw, "deleted", "is_deleted")
-    return bool(marker) or author in {"[deleted]", "deleted"}
+    authors = [raw[key] for key in ("author", "author_username") if key in raw]
+    markers = [raw[key] for key in ("deleted", "is_deleted") if key in raw]
+    contents = [raw[key] for key in ("body", "bodyText", "selftext", "text") if key in raw]
+    return bool(any(markers)) or any(value in {"[deleted]", "deleted"} for value in authors + contents)
 
 
 def _removed(raw: Mapping[str, Any]) -> bool:
-    marker = _value(raw, "removed", "is_removed", "removed_by_category")
-    body = _value(raw, "body", "bodyText", "selftext")
-    return bool(marker) or body in {"[removed]", "removed"}
+    markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
+    contents = [raw[key] for key in ("body", "bodyText", "selftext") if key in raw]
+    return bool(any(markers)) or any(value in {"[removed]", "removed"} for value in contents)
 
 
 def post_id(raw: Mapping[str, Any]) -> str:

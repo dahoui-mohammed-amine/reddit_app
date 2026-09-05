@@ -55,6 +55,18 @@ class Gap:
 
 
 @dataclass(slots=True)
+class RequestRecord:
+    request_id: str | None
+    operation: str
+    response_status: int | None = None
+    cache_status: str | None = None
+    cache_observed_at: str | None = None
+    billed: bool | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    request_units: int = 1
+
+
+@dataclass(slots=True)
 class PageResult:
     posts: list[PostSnapshot]
     requested_cursor: str | None
@@ -67,6 +79,7 @@ class PageResult:
     cache_observed_at: str | None = None
     gaps: list[Gap] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    request_records: list[RequestRecord] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -79,6 +92,8 @@ class RefreshResult:
     cache_observed_at: str | None = None
     gaps: list[Gap] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    request_records: list[RequestRecord] = field(default_factory=list)
+    observation_requests: dict[str, RequestRecord] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

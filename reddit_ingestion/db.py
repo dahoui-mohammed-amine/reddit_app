@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from .models import CommentSnapshot, Gap, PageResult, PostSnapshot, RefreshResult
+from .models import CommentSnapshot, Gap, PageResult, PostSnapshot, RefreshResult, RequestRecord
 
 
 SCHEMA = """
@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS gaps (
     provider TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS requests (
-    request_id TEXT PRIMARY KEY,
+    request_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
     run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
     provider TEXT NOT NULL,
     operation TEXT NOT NULL,
@@ -119,7 +120,34 @@ class Database:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.executescript(SCHEMA)
+        self._migrate_requests()
         self.connection.commit()
+
+    def _migrate_requests(self) -> None:
+        columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(requests)")}
+        if "request_event_id" in columns:
+            return
+        self.connection.execute("ALTER TABLE requests RENAME TO requests_legacy")
+        self.connection.execute(
+            """CREATE TABLE requests (
+            request_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            response_status INTEGER,
+            billed INTEGER,
+            cache_status TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+            )"""
+        )
+        self.connection.execute(
+            """INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, metadata_json)
+            SELECT request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, metadata_json
+            FROM requests_legacy"""
+        )
+        self.connection.execute("DROP TABLE requests_legacy")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -156,31 +184,36 @@ class Database:
                 self._save_comment(comment, post.post_id, provider)
                 if comment.deleted or comment.removed:
                     page.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
+            if page.metadata.get("comments_expanded"):
+                self._prune_comments(post.post_id, post.comments)
         listing_status = page.metadata.get("listing_status")
         if listing_status in {"truncated", "unknown"}:
             page.gaps.append(Gap("listing", "truncated", subreddit=subreddit, detail=f"listing_status={listing_status}"))
         for gap in page.gaps:
             self._save_gap(run_id, provider, gap, page.observed_at, subreddit=subreddit)
-        self.connection.execute(
-            "INSERT INTO checkpoints(subreddit, cursor, page_count, observed_at, provider, source_url) VALUES (?, ?, 1, ?, ?, ?) ON CONFLICT(subreddit) DO UPDATE SET cursor=excluded.cursor, page_count=checkpoints.page_count+1, observed_at=excluded.observed_at, provider=excluded.provider, source_url=excluded.source_url",
-            (subreddit, page.next_cursor, page.observed_at, provider, page.source_url),
-        )
-        self._save_request(run_id, provider, "discover", page.request_id, page.response_status, page.cache_status, page.metadata)
+        if not page.metadata.get("request_failed"):
+            self.connection.execute(
+                "INSERT INTO checkpoints(subreddit, cursor, page_count, observed_at, provider, source_url) VALUES (?, ?, 1, ?, ?, ?) ON CONFLICT(subreddit) DO UPDATE SET cursor=excluded.cursor, page_count=checkpoints.page_count+1, observed_at=excluded.observed_at, provider=excluded.provider, source_url=excluded.source_url",
+                (subreddit, page.next_cursor, page.observed_at, provider, page.source_url),
+            )
+        self._save_request_records(run_id, provider, page.request_records, "discover", page.request_id, page.response_status, page.cache_status, page.metadata)
         return len(page.posts), sum(len(post.comments) for post in page.posts)
 
     def save_refresh(self, run_id: str, provider: str, result: RefreshResult) -> tuple[int, int]:
         for post in result.posts:
             self._save_post(post, provider)
-            self._save_observation(post, provider, result)
+            self._save_observation(post, provider, result, result.observation_requests.get(post.post_id))
             if post.deleted or post.removed:
                 result.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
             for comment in post.comments:
                 self._save_comment(comment, post.post_id, provider)
                 if comment.deleted or comment.removed:
                     result.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
+            if result.metadata.get("comments_expanded"):
+                self._prune_comments(post.post_id, post.comments)
         for gap in result.gaps:
             self._save_gap(run_id, provider, gap, result.observed_at)
-        self._save_request(run_id, provider, "refresh", result.request_id, result.response_status, result.cache_status, result.metadata)
+        self._save_request_records(run_id, provider, result.request_records, "refresh", result.request_id, result.response_status, result.cache_status, result.metadata)
         return len(result.posts), sum(len(post.comments) for post in result.posts)
 
     def _save_post(self, post: PostSnapshot, provider: str) -> None:
@@ -196,10 +229,15 @@ class Database:
             (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, provider, post.observed_at),
         )
 
-    def _save_observation(self, post: PostSnapshot, provider: str, result: PageResult | RefreshResult) -> None:
+    def _save_observation(self, post: PostSnapshot, provider: str, result: PageResult | RefreshResult, request: RequestRecord | None = None) -> None:
+        response_status = request.response_status if request else result.response_status
+        request_id = request.request_id if request else result.request_id
+        cache_status = request.cache_status if request else result.cache_status
+        cache_observed_at = request.cache_observed_at if request else result.cache_observed_at
+        metadata = request.metadata if request else result.metadata
         self.connection.execute(
             "INSERT INTO post_observations(post_id, observed_at, provider, source_created_at, score, ups, upvote_ratio, num_comments, response_status, request_id, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (post.post_id, post.observed_at, provider, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, result.response_status, result.request_id, result.cache_status, result.cache_observed_at, json.dumps(result.metadata, sort_keys=True)),
+            (post.post_id, post.observed_at, provider, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, response_status, request_id, cache_status, cache_observed_at, json.dumps(metadata, sort_keys=True)),
         )
 
     def _save_comment(self, comment: CommentSnapshot, post_id: str, provider: str) -> None:
@@ -214,12 +252,54 @@ class Database:
             (comment.comment_id, comment.fullname or f"t1_{comment.comment_id}", post_id, comment.parent_id, author, body, comment.permalink, comment.created_at, comment.score, comment.ups, comment.depth, deleted, removed, comment.observed_at, provider, comment.observed_at),
         )
 
+    def _prune_comments(self, post_id: str, comments: list[CommentSnapshot]) -> None:
+        if comments:
+            placeholders = ",".join("?" for _ in comments)
+            self.connection.execute(
+                f"DELETE FROM comments WHERE post_id = ? AND comment_id NOT IN ({placeholders})",
+                (post_id, *(comment.comment_id for comment in comments)),
+            )
+        else:
+            self.connection.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+
     def _save_gap(self, run_id: str, provider: str, gap: Gap, observed_at: str, *, subreddit: str | None = None) -> None:
         self.connection.execute("INSERT INTO gaps(run_id, entity_type, entity_id, subreddit, reason, detail, observed_at, provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (run_id, gap.entity_type, gap.entity_id, gap.subreddit or subreddit, gap.reason, gap.detail, observed_at, provider))
 
-    def _save_request(self, run_id: str, provider: str, operation: str, request_id: str | None, status: int | None, cache_status: str | None, metadata: dict[str, Any]) -> None:
+    def _save_request_records(
+        self,
+        run_id: str,
+        provider: str,
+        records: list[RequestRecord],
+        operation: str,
+        request_id: str | None,
+        status: int | None,
+        cache_status: str | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        if records:
+            for record in records:
+                self._save_request(run_id, provider, record.operation, record.request_id, record.response_status, record.cache_status, record.metadata, record.billed, record.request_units)
+        elif request_id is not None:
+            self._save_request(run_id, provider, operation, request_id, status, cache_status, metadata)
+
+    def _save_request(
+        self,
+        run_id: str,
+        provider: str,
+        operation: str,
+        request_id: str | None,
+        status: int | None,
+        cache_status: str | None,
+        metadata: dict[str, Any],
+        billed: bool | None = None,
+        request_units: int = 1,
+    ) -> None:
         request_id = request_id or str(uuid.uuid4())
-        self.connection.execute("INSERT OR REPLACE INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, metadata_json) VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)", (request_id, run_id, provider, operation, status, None if cache_status == "cached" else 1, cache_status, json.dumps(metadata, sort_keys=True)))
+        request_metadata = dict(metadata)
+        request_metadata.setdefault("request_units", max(1, request_units))
+        if billed is None:
+            billed = False if provider == "fixture" else False if cache_status == "cached" else None
+        self.connection.execute("INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, metadata_json) VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)", (request_id, run_id, provider, operation, status, None if billed is None else int(billed), cache_status, json.dumps(request_metadata, sort_keys=True)))
 
     def due_posts(self, interval_minutes: int, limit: int) -> list[PostSnapshot]:
         rows = self.connection.execute("SELECT * FROM posts WHERE datetime(observed_at) <= datetime('now', ?) ORDER BY observed_at ASC LIMIT ?", (f"-{interval_minutes} minutes", limit)).fetchall()
@@ -232,4 +312,4 @@ class Database:
         return post_count
 
     def counts(self) -> dict[str, int]:
-        return {name: int(self.connection.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]) for name in ("posts", "post_observations", "comments", "gaps", "checkpoints")}
+        return {name: int(self.connection.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]) for name in ("posts", "post_observations", "comments", "gaps", "requests", "checkpoints")}

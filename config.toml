@@ -19,5 +19,6 @@ name = "fixture"
 fixture_path = "fixtures/sample.json"
 request_timeout_seconds = 30
 max_retries = 3
+min_request_interval_seconds = 0.25
 # Documentation only; live runs still require the CLI --allow-paid flag.
 allow_paid = false

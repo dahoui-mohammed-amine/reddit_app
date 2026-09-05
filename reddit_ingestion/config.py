@@ -22,6 +22,7 @@ class Config:
     request_timeout_seconds: float
     max_retries: int
     allow_paid: bool
+    request_interval_seconds: float = 0.25
 
 
 def _path(value: str | None, base: Path) -> Path | None:
@@ -67,4 +68,5 @@ def load_config(path: str | Path) -> Config:
         request_timeout_seconds=max(1.0, float(provider.get("request_timeout_seconds", 30))),
         max_retries=max(0, int(provider.get("max_retries", 3))),
         allow_paid=bool(provider.get("allow_paid", False)),
+        request_interval_seconds=max(0.0, float(provider.get("min_request_interval_seconds", 0.25))),
     )

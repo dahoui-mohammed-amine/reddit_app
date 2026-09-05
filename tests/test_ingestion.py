@@ -11,8 +11,8 @@ from reddit_ingestion.comments import apply_comment_policy
 from reddit_ingestion.config import Config
 from reddit_ingestion.db import Database
 from reddit_ingestion.models import CommentSnapshot, PageResult, PostSnapshot
-from reddit_ingestion.normalize import parse_post
-from reddit_ingestion.providers import FixtureProvider, JsonClient, HttpResponse, ProviderError, RedditApisProvider
+from reddit_ingestion.normalize import parse_comment, parse_post
+from reddit_ingestion.providers import FetchLayerProvider, FixtureProvider, JsonClient, HttpResponse, ProviderError, RedditApisProvider
 from reddit_ingestion.runner import check_live_access, run_once
 
 
@@ -61,6 +61,23 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(post.score, 7)
         self.assertEqual(post.num_comments, 2)
 
+    def test_normalization_recognizes_deleted_content_markers(self) -> None:
+        post = parse_post({"id": "deleted", "author": None, "selftext": "[deleted]"})
+        comment = parse_comment({"id": "comment", "author": None, "body": "[deleted]"}, post=post, observed_at=post.observed_at)
+        self.assertTrue(post.deleted)
+        self.assertTrue(comment.deleted)
+
+    def test_fixture_discovery_collects_comments_and_preserves_request_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            run_once(db, FixtureProvider(FIXTURE), config(root), "discover")
+            requests = db.connection.execute("SELECT request_id, billed FROM requests ORDER BY request_event_id").fetchall()
+            self.assertEqual(len(requests), 3)
+            self.assertEqual(db.counts()["comments"], 2)
+            self.assertTrue(all(row["request_id"] == "fixture" and row["billed"] == 0 for row in requests))
+            db.close()
+
     def test_discovery_resume_and_idempotent_current_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Database(Path(directory) / "db.sqlite3")
@@ -74,7 +91,7 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual([post.post_id for post in resumed_page.posts], ["freelance002"])
             second = run_once(db, provider, cfg, "discover")
             self.assertEqual(second.discovered, 3)
-            self.assertEqual(db.counts()["posts"], 3)
+            self.assertEqual(db.counts()["posts"], 4)
             self.assertEqual(db.counts()["post_observations"], 6)
             db.close()
 
@@ -123,6 +140,13 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(len(calls), 3)
 
+    def test_json_client_paces_successive_requests(self) -> None:
+        delays: list[float] = []
+        client = JsonClient(timeout=1, retries=0, transport=lambda *args: HttpResponse(200, {}, b"{}"), sleep=delays.append, min_interval_seconds=1)
+        client.request("GET", "https://example.test/one", headers={})
+        client.request("GET", "https://example.test/two", headers={})
+        self.assertTrue(any(delay > 0 for delay in delays))
+
     def test_json_client_reports_terminal_error_and_billing(self) -> None:
         client = JsonClient(timeout=1, retries=0, transport=lambda *args: HttpResponse(429, {}, b'{"error":"slow"}'), sleep=lambda _: None)
         with self.assertRaises(ProviderError) as context:
@@ -137,6 +161,57 @@ class IngestionTests(unittest.TestCase):
                 self.assertFalse(provider.status().available)
                 with self.assertRaises(ProviderError):
                     check_live_access(provider, allow_paid=False)
+
+    def test_redditapis_bounded_comments_are_requested_and_audited(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.urls: list[str] = []
+
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                self.urls.append(url)
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p", "title": "Post", "num_comments": 1}]}, HttpResponse(200, {}, b""), "post-request"
+                return {"comments": [{"id": "c", "name": "t1_c", "body": "Comment", "parent_id": "t3_p"}]}, HttpResponse(200, {}, b""), "comment-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis", limit=1)
+            client = Client()
+            result = RedditApisProvider(cfg, client=client).refresh_posts([PostSnapshot("p", "t3_p", "freelance", permalink="/r/freelance/comments/p/post/")], cfg)
+            self.assertIn("depth=1", client.urls[1])
+            self.assertIn("limit=1", client.urls[1])
+            self.assertEqual([record.operation for record in result.request_records], ["refresh", "comments"])
+            self.assertEqual(result.observation_requests["p"].request_id, "post-request")
+
+    def test_fetchlayer_full_comments_report_unsupported_without_calling_provider(self) -> None:
+        class Client:
+            def request(self, *args: object, **kwargs: object) -> tuple[dict[str, object], HttpResponse, str]:
+                raise AssertionError("full mode must not call the unsupported expansion")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="fetchlayer", comments="full")
+            result = FetchLayerProvider(cfg, client=Client()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertEqual(result.request_records, [])
+            self.assertEqual(result.gaps[0].reason, "unexpanded")
+
+    def test_discovery_provider_failure_persists_gap_without_checkpoint(self) -> None:
+        class FailedProvider:
+            name = "redditapis"
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                raise ProviderError("service unavailable", status=503, retryable=True, billed=True, request_id="failed-request", url="https://provider.test/listing")
+
+            def refresh_posts(self, posts: list[PostSnapshot], config: Config):
+                raise AssertionError("refresh is not part of discover mode")
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "db.sqlite3")
+            summary = run_once(db, FailedProvider(), config(Path(directory), provider="redditapis"), "discover")
+            self.assertEqual(summary.gaps, 3)
+            self.assertIsNone(db.checkpoint("freelance"))
+            request = db.connection.execute("SELECT request_id, response_status, billed FROM requests").fetchone()
+            self.assertEqual(tuple(request), ("failed-request", 503, 1))
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='provider_error'").fetchone()[0], 3)
+            db.close()
 
     def test_comment_policy_off_and_full(self) -> None:
         post = PostSnapshot("p", "t3_p", comments=[CommentSnapshot("c", "t1_c", "p", depth=2)])
