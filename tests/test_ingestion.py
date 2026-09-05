@@ -4,9 +4,12 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
+from reddit_ingestion.cli import main as cli_main
 from reddit_ingestion.comments import apply_comment_policy
 from reddit_ingestion.config import Config
 from reddit_ingestion.db import Database
@@ -340,6 +343,96 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(client.calls, 1)
             self.assertEqual(len(result.posts), 1)
             self.assertEqual(result.gaps[0].reason, "unexpanded")
+
+    def test_fetchlayer_next_page_is_an_unexpanded_comment_gap(self) -> None:
+        class Client:
+            def request(self, *args: object, **kwargs: object) -> tuple[dict[str, object], HttpResponse, str]:
+                return (
+                    {
+                        "id": "p",
+                        "name": "t3_p",
+                        "title": "Post",
+                        "num_comments": 1,
+                        "comments": [{"id": "c", "name": "t1_c", "body": "Comment"}],
+                        "nextPageUrl": "https://provider.test/next",
+                    },
+                    HttpResponse(200, {}, b""),
+                    "refresh-request",
+                )
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="fetchlayer")
+            result = FetchLayerProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "freelance", permalink="/r/freelance/comments/p/post/")], cfg
+            )
+            self.assertEqual(len(result.posts[0].comments), 1)
+            self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
+            self.assertFalse(result.metadata["comments_expanded"])
+
+    def test_malformed_discovery_items_are_audited(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                return {"posts": [{"title": "missing id"}]}, HttpResponse(200, {}, b""), f"request-{url.rsplit('=', 1)[-1]}"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = config(root, provider="redditapis")
+            summary = run_once(db, RedditApisProvider(cfg, client=Client()), cfg, "discover")
+            self.assertEqual(summary.gaps, 3)
+            self.assertEqual(summary.requests, 3)
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM requests").fetchone()[0], 3)
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='provider_error'").fetchone()[0], 3)
+            db.close()
+
+    def test_malformed_comment_is_audited_and_expansion_metadata_stays_false(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 1}]}, HttpResponse(200, {}, b""), "post-request"
+                return {"comments": [{"body": "missing id"}]}, HttpResponse(200, {}, b""), "comment-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis", comments="full")
+            result = RedditApisProvider(cfg, client=Client()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertEqual(len(result.request_records), 2)
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in result.gaps))
+            self.assertFalse(result.metadata["comments_expanded"])
+
+    def test_dry_run_plans_refreshes_from_existing_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_path = root / "db.sqlite3"
+            db = Database(database_path)
+            observed = "2026-09-05T00:00:00Z"
+            post = PostSnapshot("p", "t3_p", "freelance", observed_at=observed)
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([post], None, None, observed, "fixture://p", 200, "fixture"))
+            db.close()
+            config_path = root / "config.toml"
+            config_path.write_text(
+                f"""[ingestion]
+subreddits = [\"freelance\"]
+database_path = \"{database_path}\"
+
+[provider]
+name = \"fixture\"
+fixture_path = \"{FIXTURE}\"
+""",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli_main(["plan", "--config", str(config_path), "--dry-run"]), 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "dry_run")
+            self.assertEqual(payload["plan"]["refresh_events"], 1)
+            check = Database(database_path)
+            try:
+                self.assertEqual(check.counts()["posts"], 1)
+            finally:
+                check.close()
 
     def test_discovery_provider_failure_persists_gap_without_checkpoint(self) -> None:
         class FailedProvider:

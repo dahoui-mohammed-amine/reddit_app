@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -10,6 +11,22 @@ from .config import load_config
 from .db import Database
 from .providers import ProviderError, make_provider
 from .runner import check_live_access, plan_for, render_plan, run_once
+
+
+def _existing_post_count(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return 0
+    try:
+        try:
+            return int(connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0])
+        except sqlite3.Error:
+            return 0
+    finally:
+        connection.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         status = provider.status()
         if args.dry_run:
-            plan = provider.plan(config, 0)
+            plan = provider.plan(config, _existing_post_count(config.database_path))
             print(json.dumps({"status": "dry_run", "provider": asdict(status), "database": str(config.database_path), "plan": json.loads(render_plan(plan))}, indent=2))
             return 0
         db = Database(config.database_path)
