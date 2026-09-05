@@ -205,6 +205,7 @@ class Database:
         return len(page.posts), sum(len(post.comments) for post in page.posts)
 
     def save_refresh(self, run_id: str, provider: str, result: RefreshResult) -> tuple[int, int]:
+        self._defer_omitted_full_comments(result)
         for post in result.posts:
             self._save_post(post, provider)
             self._save_observation(post, provider, result, result.observation_requests.get(post.post_id))
@@ -218,6 +219,27 @@ class Database:
             self._save_gap(run_id, provider, gap, result.observed_at)
         self._save_request_records(run_id, provider, result.request_records, "refresh", result.request_id, result.response_status, result.cache_status, result.cache_observed_at, result.metadata)
         return len(result.posts), sum(len(post.comments) for post in result.posts)
+
+    def _defer_omitted_full_comments(self, result: RefreshResult) -> None:
+        if result.metadata.get("comments_mode") != "full" or result.metadata.get("comments_expanded") is False:
+            return
+        for post in result.posts:
+            known_ids = {
+                row[0]
+                for row in self.connection.execute("SELECT comment_id FROM comments WHERE post_id = ?", (post.post_id,))
+            }
+            returned_ids = {comment.comment_id for comment in post.comments}
+            if known_ids - returned_ids:
+                result.gaps.append(
+                    Gap(
+                        "comment",
+                        "unexpanded",
+                        entity_id=post.post_id,
+                        subreddit=post.subreddit,
+                        detail="full refresh omitted previously known comments without deletion confirmation",
+                    )
+                )
+                result.metadata["comments_expanded"] = False
 
     def _save_post(self, post: PostSnapshot, provider: str) -> None:
         deleted = int(post.deleted)
@@ -245,7 +267,7 @@ class Database:
         request_id = request.request_id if request else result.request_id
         cache_status = request.cache_status if request else result.cache_status
         cache_observed_at = request.cache_observed_at if request else result.cache_observed_at
-        metadata = request.metadata if request else result.metadata
+        metadata = {**request.metadata, **result.metadata} if request else result.metadata
         self.connection.execute(
             "INSERT INTO post_observations(post_id, observed_at, provider, source_created_at, score, ups, upvote_ratio, num_comments, response_status, request_id, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (post.post_id, post.observed_at, provider, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, response_status, request_id, cache_status, cache_observed_at, json.dumps(metadata, sort_keys=True)),

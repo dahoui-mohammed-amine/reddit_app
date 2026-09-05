@@ -162,6 +162,43 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(tuple(comment_row), ("t3_p", "commenter", "one", 2))
             db.close()
 
+    def test_full_refresh_defers_omitted_comments_without_deletion_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            initial = PostSnapshot(
+                "p",
+                "t3_p",
+                "freelance",
+                num_comments=2,
+                observed_at=observed,
+                comments=[
+                    CommentSnapshot("c1", "t1_c1", "p", body="one", observed_at=observed),
+                    CommentSnapshot("c2", "t1_c2", "p", body="two", observed_at=observed),
+                ],
+            )
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([initial], None, None, observed, "fixture://p", 200, "fixture"))
+            full = PostSnapshot(
+                "p",
+                "t3_p",
+                "freelance",
+                num_comments=1,
+                observed_at=observed,
+                comments=[CommentSnapshot("c1", "t1_c1", "p", body="updated", observed_at=observed)],
+            )
+            result = RefreshResult([full], observed, "refresh", 200, metadata={"comments_mode": "full", "comments_expanded": True})
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", result)
+            row = db.connection.execute("SELECT body FROM comments WHERE comment_id='c2'").fetchone()
+            self.assertEqual(row[0], "two")
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "unexpanded" for gap in result.gaps))
+            metadata = json.loads(db.connection.execute("SELECT metadata_json FROM post_observations ORDER BY observation_id DESC LIMIT 1").fetchone()[0])
+            self.assertFalse(metadata["comments_expanded"])
+            db.close()
+
     def test_blocked_listing_records_gap_without_advancing_checkpoint(self) -> None:
         class BlockedProvider:
             name = "fixture"
@@ -741,8 +778,14 @@ fixture_path = \"{FIXTURE}\"
         self.assertEqual(post.comments, [])
         post.comments = [CommentSnapshot("c", "t1_c", "p", depth=2)]
         full = config(Path("/tmp"), comments="full")
-        self.assertEqual(apply_comment_policy([post], full), [])
+        self.assertEqual(apply_comment_policy([post], full)[0].reason, "unexpanded")
         self.assertEqual(len(post.comments), 1)
+
+    def test_unknown_comment_count_is_not_complete(self) -> None:
+        post = PostSnapshot("p", "t3_p", "freelance")
+        gaps = apply_comment_policy([post], config(Path("/tmp"), comments="full"))
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0].reason, "unexpanded")
 
 
 if __name__ == "__main__":

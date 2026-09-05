@@ -9,7 +9,7 @@ from .config import Config
 from .db import Database
 from .models import Gap, PageResult, Plan, RefreshResult, RunSummary, RequestRecord
 from .normalize import utc_now
-from .providers import Provider, ProviderError
+from .providers import Provider, ProviderError, _failed_request_records
 
 
 def config_dict(config: Config) -> dict[str, Any]:
@@ -36,28 +36,6 @@ def _request_units(records: list[RequestRecord], request_id: str | None) -> int:
     if records:
         return sum(max(1, record.request_units) for record in records)
     return 1 if request_id else 0
-
-
-def _failure_record(operation: str, error: ProviderError) -> list[RequestRecord]:
-    if error.request_id is None:
-        return []
-    metadata = {"error": str(error)}
-    if error.url:
-        metadata["url"] = error.url
-    if error.attempts:
-        return [
-            RequestRecord(
-                error.request_id,
-                operation,
-                attempt.status,
-                "unknown",
-                None,
-                attempt.billed,
-                {**metadata, "attempt": index, "attempt_count": len(error.attempts)},
-            )
-            for index, attempt in enumerate(error.attempts, start=1)
-        ]
-    return [RequestRecord(error.request_id, operation, error.status, "unknown", None, error.billed, metadata)]
 
 
 def run_once(db: Database, provider: Provider, config: Config, mode: str) -> RunSummary:
@@ -91,7 +69,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str) -> Run
                             cache_status="unknown" if exc.request_id else None,
                             gaps=[Gap("listing", "provider_error", subreddit=subreddit, detail=str(exc))],
                             metadata={"request_failed": True, "error": str(exc)},
-                            request_records=_failure_record("discover", exc),
+                            request_records=_failed_request_records(None, "discover", exc.url or "", exc),
                         )
                         with db.transaction():
                             db.save_page(run_id, provider.name, subreddit, page)
@@ -138,8 +116,9 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str) -> Run
                         cache_status="unknown" if exc.request_id else None,
                         gaps=[Gap("post", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for post in due],
                         metadata={"request_failed": True, "error": str(exc)},
-                        request_records=_failure_record("refresh", exc),
+                        request_records=_failed_request_records(None, "refresh", exc.url or "", exc),
                     )
+                result.metadata["comments_mode"] = config.comments_mode
                 result.gaps.extend(apply_comment_policy(result.posts, config))
                 if any(gap.entity_type == "comment" for gap in result.gaps):
                     result.metadata["comments_expanded"] = False

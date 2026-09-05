@@ -344,6 +344,10 @@ class FixtureProvider:
             if raw is None:
                 if post.num_comments:
                     gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=subreddit, detail="fixture has no comment expansion data"))
+                else:
+                    count_gap = comment_count_gap(post)
+                    if count_gap:
+                        gaps.append(count_gap)
                 continue
             try:
                 comment_errors: list[Exception] = []
@@ -409,7 +413,7 @@ class FixtureProvider:
                 gaps.append(count_gap)
             refreshed.append(refreshed_post)
         observations = {post.post_id: record for post in refreshed}
-        return RefreshResult(refreshed, observed, "fixture", 200, gaps=gaps, metadata={"comments_expanded": _comments_complete(gaps)}, request_records=[record], observation_requests=observations)
+        return RefreshResult(refreshed, observed, "fixture", 200, gaps=gaps, metadata={"comments_mode": config.comments_mode, "comments_expanded": _comments_complete(gaps)}, request_records=[record], observation_requests=observations)
 
 
 class HttpProviderBase:
@@ -623,7 +627,7 @@ class RedditApisProvider(HttpProviderBase):
                     records.extend(comment_records)
                     all_posts.append(refreshed)
         primary = next((record for record in records if record.operation == "refresh"), None)
-        return RefreshResult(all_posts, utc_now(), primary.request_id if primary else None, primary.response_status if primary else None, primary.cache_status if primary else None, primary.cache_observed_at if primary else None, gaps, {"batch_count": (len(posts) + 99) // 100, "comments_expanded": _comments_complete(gaps)}, records, observation_requests)
+        return RefreshResult(all_posts, utc_now(), primary.request_id if primary else None, primary.response_status if primary else None, primary.cache_status if primary else None, primary.cache_observed_at if primary else None, gaps, {"batch_count": (len(posts) + 99) // 100, "comments_mode": config.comments_mode, "comments_expanded": _comments_complete(gaps)}, records, observation_requests)
 
 
 class FetchLayerProvider(HttpProviderBase):
@@ -717,7 +721,7 @@ class FetchLayerProvider(HttpProviderBase):
             records.extend(result.request_records)
             observation_requests.update(result.observation_requests)
         primary = next((record for record in records if record.operation == "refresh"), None)
-        return RefreshResult(refreshed, utc_now(), primary.request_id if primary else None, primary.response_status if primary else None, primary.cache_status if primary else None, primary.cache_observed_at if primary else None, gaps, {"comments_expanded": _comments_complete(gaps)}, records, observation_requests)
+        return RefreshResult(refreshed, utc_now(), primary.request_id if primary else None, primary.response_status if primary else None, primary.cache_status if primary else None, primary.cache_observed_at if primary else None, gaps, {"comments_mode": config.comments_mode, "comments_expanded": _comments_complete(gaps)}, records, observation_requests)
 
     def _fetch_post(self, post: PostSnapshot, config: Config, operation: str, key: str) -> RefreshResult:
         url = post.permalink or post.url
