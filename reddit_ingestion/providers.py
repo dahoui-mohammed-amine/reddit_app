@@ -366,7 +366,13 @@ class RedditApisProvider(HttpProviderBase):
         gaps: list[Gap] = []
         records: list[RequestRecord] = []
         cursor: str | None = None
+        seen_cursors: set[str] = set()
         while True:
+            if cursor is not None:
+                if cursor in seen_cursors:
+                    gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="provider repeated a previously seen comment cursor"))
+                    break
+                seen_cursors.add(cursor)
             params: dict[str, str] = {}
             if config.comments_mode == "bounded":
                 params.update({"depth": str(config.comment_depth), "limit": str(config.comment_limit)})
@@ -397,9 +403,6 @@ class RedditApisProvider(HttpProviderBase):
             if incomplete and not next_cursor:
                 gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="full provider response is incomplete"))
             if not next_cursor:
-                break
-            if next_cursor == cursor:
-                gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="provider repeated the comment cursor"))
                 break
             cursor = str(next_cursor)
         post.comments = comments

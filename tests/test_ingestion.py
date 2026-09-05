@@ -122,10 +122,14 @@ class IngestionTests(unittest.TestCase):
                 "p",
                 "t3_p",
                 "freelance",
+                title="original title",
+                body="original body",
+                author="original author",
+                score=10,
                 num_comments=2,
                 observed_at=observed,
                 comments=[
-                    CommentSnapshot("c1", "t1_c1", "p", body="one", observed_at=observed),
+                    CommentSnapshot("c1", "t1_c1", "p", parent_id="t3_p", author="commenter", body="one", score=1, observed_at=observed),
                     CommentSnapshot("c2", "t1_c2", "p", body="two", observed_at=observed),
                 ],
             )
@@ -135,9 +139,10 @@ class IngestionTests(unittest.TestCase):
                 "p",
                 "t3_p",
                 "freelance",
+                score=11,
                 num_comments=2,
                 observed_at=observed,
-                comments=[CommentSnapshot("c1", "t1_c1", "p", body="updated", observed_at=observed)],
+                comments=[CommentSnapshot("c1", "t1_c1", "p", score=2, observed_at=observed)],
             )
             with db.transaction():
                 db.save_refresh(
@@ -147,6 +152,10 @@ class IngestionTests(unittest.TestCase):
                 )
             comment_ids = [row[0] for row in db.connection.execute("SELECT comment_id FROM comments ORDER BY comment_id")]
             self.assertEqual(comment_ids, ["c1", "c2"])
+            post_row = db.connection.execute("SELECT title, body, author, score FROM posts WHERE post_id='p'").fetchone()
+            self.assertEqual(tuple(post_row), ("original title", "original body", "original author", 11))
+            comment_row = db.connection.execute("SELECT parent_id, author, body, score FROM comments WHERE comment_id='c1'").fetchone()
+            self.assertEqual(tuple(comment_row), ("t3_p", "commenter", "one", 2))
             db.close()
 
     def test_blocked_listing_records_gap_without_advancing_checkpoint(self) -> None:
@@ -195,6 +204,29 @@ class IngestionTests(unittest.TestCase):
             self.assertIsNone(db.checkpoint("freelance"))
             self.assertEqual(db.connection.execute("SELECT reason FROM gaps").fetchone()[0], "truncated")
             db.close()
+
+    def test_full_comment_cursor_cycle_stops_before_repeating_request(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.urls: list[str] = []
+
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                self.urls.append(url)
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 3}]}, HttpResponse(200, {}, b""), "post-request"
+                if "after=A" in url:
+                    return {"comments": [{"id": "c2", "name": "t1_c2", "body": "two"}], "after": "B"}, HttpResponse(200, {}, b""), "comment-request-a"
+                if "after=B" in url:
+                    return {"comments": [{"id": "c3", "name": "t1_c3", "body": "three"}], "after": "A"}, HttpResponse(200, {}, b""), "comment-request-b"
+                return {"comments": [{"id": "c1", "name": "t1_c1", "body": "one"}], "after": "A"}, HttpResponse(200, {}, b""), "comment-request-first"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis", comments="full")
+            client = Client()
+            result = RedditApisProvider(cfg, client=client).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertEqual(len([url for url in client.urls if "/comments" in url]), 3)
+            self.assertEqual(len(result.posts[0].comments), 3)
+            self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
 
     def test_deletion_clears_mutable_content_but_retains_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
