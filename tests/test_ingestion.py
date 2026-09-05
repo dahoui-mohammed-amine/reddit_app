@@ -243,6 +243,38 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(refresh_until, "2026-10-01T00:00:00Z")
             db.close()
 
+    def test_later_source_timestamp_corrects_observation_based_expiry(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                self.calls += 1
+                observed = "2026-09-05T00:00:00Z"
+                created_at = None if self.calls == 1 else "2020-01-01T00:00:00Z"
+                return PageResult(
+                    [PostSnapshot("p", "t3_p", subreddit, created_at=created_at, num_comments=0, observed_at=observed)],
+                    cursor,
+                    None,
+                    observed,
+                    "fixture://p",
+                    200,
+                    "request",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root), subreddits=("freelance",), refresh_expiry_days=30)
+            provider = Provider()
+            run_once(db, provider, cfg, "discover")
+            run_once(db, provider, cfg, "discover")
+            refresh_until = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='p'").fetchone()[0]
+            self.assertEqual(refresh_until, "2020-01-31T00:00:00Z")
+            db.close()
+
     def test_partial_comment_results_do_not_delete_existing_comments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -537,6 +569,36 @@ class IngestionTests(unittest.TestCase):
             run_once(db, Provider(), cfg, "discover")
             metadata = json.loads(db.connection.execute("SELECT metadata_json FROM post_observations").fetchone()[0])
             self.assertFalse(metadata["comments_expanded"])
+            db.close()
+
+    def test_discovery_tracks_comment_completeness_per_post(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            page = PageResult(
+                [
+                    PostSnapshot("p1", "t3_p1", "freelance", num_comments=0, observed_at=observed),
+                    PostSnapshot("p2", "t3_p2", "freelance", num_comments=0, observed_at=observed),
+                ],
+                None,
+                None,
+                observed,
+                "fixture://posts",
+                200,
+                "request",
+                gaps=[Gap("comment", "provider_error", entity_id="p2", subreddit="freelance")],
+                metadata={"comments_expanded": False},
+            )
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", page)
+            metadata = {
+                row[0]: json.loads(row[1])
+                for row in db.connection.execute("SELECT post_id, metadata_json FROM post_observations ORDER BY observation_id")
+            }
+            self.assertTrue(metadata["p1"]["comments_expanded"])
+            self.assertFalse(metadata["p2"]["comments_expanded"])
             db.close()
 
     def test_full_comment_cursor_cycle_stops_before_repeating_request(self) -> None:

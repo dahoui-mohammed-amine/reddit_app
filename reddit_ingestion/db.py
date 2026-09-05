@@ -192,7 +192,7 @@ class Database:
     def save_page(self, run_id: str, provider: str, subreddit: str, page: PageResult) -> tuple[int, int]:
         for post in page.posts:
             self._save_post(post, provider)
-            self._save_observation(post, provider, page)
+            self._save_observation(post, provider, page, result_metadata=self._observation_metadata(page, post.post_id))
             if post.deleted or post.removed:
                 page.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
             for comment in post.comments:
@@ -218,13 +218,13 @@ class Database:
         self._defer_omitted_full_comments(result)
         for post in result.posts:
             self._save_post(post, provider)
-            metadata = dict(result.metadata)
-            if "comments_expanded" in metadata:
-                metadata["comments_expanded"] = not any(
-                    gap.entity_type == "comment" and (gap.entity_id is None or gap.entity_id == post.post_id)
-                    for gap in result.gaps
-                )
-            self._save_observation(post, provider, result, result.observation_requests.get(post.post_id), metadata)
+            self._save_observation(
+                post,
+                provider,
+                result,
+                result.observation_requests.get(post.post_id),
+                self._observation_metadata(result, post.post_id),
+            )
             if post.deleted or post.removed:
                 result.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
             for comment in post.comments:
@@ -281,9 +281,18 @@ class Database:
         self.connection.execute(
             f"""INSERT INTO posts(post_id, fullname, subreddit, title, body, author, permalink, url, created_at, score, ups, upvote_ratio, num_comments, archived, locked, deleted, removed, observed_at, refresh_until, provider, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(excluded.created_at, posts.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), {archived_update}, {locked_update}, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, refresh_until=COALESCE(posts.refresh_until, excluded.refresh_until), provider=excluded.provider, updated_at=excluded.updated_at""",
+            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(excluded.created_at, posts.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), {archived_update}, {locked_update}, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, refresh_until=CASE WHEN excluded.created_at IS NOT NULL THEN excluded.refresh_until ELSE COALESCE(posts.refresh_until, excluded.refresh_until) END, provider=excluded.provider, updated_at=excluded.updated_at""",
             (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, post.refresh_until, provider, post.observed_at),
         )
+
+    def _observation_metadata(self, result: PageResult | RefreshResult, post_id: str) -> dict[str, Any]:
+        metadata = dict(result.metadata)
+        if "comments_expanded" in metadata:
+            metadata["comments_expanded"] = not any(
+                gap.entity_type == "comment" and (gap.entity_id is None or gap.entity_id == post_id)
+                for gap in result.gaps
+            )
+        return metadata
 
     def _save_observation(
         self,
