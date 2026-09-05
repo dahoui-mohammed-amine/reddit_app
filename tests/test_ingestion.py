@@ -107,6 +107,25 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(db.counts()["post_observations"], 7)
             db.close()
 
+    def test_fixture_missing_resume_page_preserves_checkpoint(self) -> None:
+        fixture = {
+            "listings": {"freelance": [{"request_after": None, "posts": []}]},
+            "refresh": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture_path = root / "fixture.json"
+            fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([], None, "saved-cursor", observed, "fixture://freelance/new", 200, "fixture"))
+            cfg = replace(config(root), subreddits=("freelance",))
+            run_once(db, FixtureProvider(fixture_path), cfg, "discover")
+            self.assertEqual(db.checkpoint("freelance")["cursor"], "saved-cursor")
+            db.close()
+
     def test_historical_refresh_and_bounded_comment_gap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -314,6 +333,26 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(db.purge_deleted_content(), 0)
             db.close()
 
+    def test_partial_snapshot_preserves_archived_and_locked_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            initial = parse_post({"id": "p", "archived": True, "locked": True}, default_subreddit="freelance", observed_at=observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([initial], None, None, observed, "fixture://p", 200, "fixture"))
+            partial = parse_post({"id": "p", "score": 5}, default_subreddit="freelance", observed_at=observed)
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", RefreshResult([partial], observed, "refresh", 200))
+            row = db.connection.execute("SELECT archived, locked, score FROM posts WHERE post_id='p'").fetchone()
+            self.assertEqual(tuple(row), (1, 1, 5))
+            cleared = parse_post({"id": "p", "archived": False, "locked": False}, default_subreddit="freelance", observed_at=observed)
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", RefreshResult([cleared], observed, "refresh", 200))
+            self.assertEqual(tuple(db.connection.execute("SELECT archived, locked FROM posts WHERE post_id='p'").fetchone()), (0, 0))
+            db.close()
+
     def test_cache_observation_timestamp_is_persisted_on_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -509,6 +548,13 @@ class IngestionTests(unittest.TestCase):
             plan = RedditApisProvider(cfg).plan(cfg, 100)
             self.assertIsNone(plan.estimated_requests)
             self.assertIsNone(plan.estimated_units)
+
+    def test_fixture_plan_respects_refresh_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = replace(config(root), subreddits=("freelance",), max_refresh_posts=100)
+            plan = FixtureProvider(FIXTURE).plan(cfg, 101, mode="refresh")
+            self.assertEqual(plan.refresh_events, 100)
 
     def test_json_client_paces_successive_requests(self) -> None:
         delays: list[float] = []

@@ -169,6 +169,8 @@ def parse_post(
         observed_at=observed,
         deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "selftext", "text"), {"[deleted]", "deleted"}),
         removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "selftext"), {"[removed]", "removed"}),
+        archived_known=raw.get("archived") is not None,
+        locked_known=raw.get("locked") is not None,
     )
     if include_comments:
         comments = _value(raw, "comments")

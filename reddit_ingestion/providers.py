@@ -332,7 +332,7 @@ class FixtureProvider:
     def plan(self, config: Config, known_posts: int, *, resume_pages: int = 0, mode: str = "run") -> Plan:
         discovery = len(config.subreddits) * config.max_discovery_pages + resume_pages if mode in {"run", "discover"} else 0
         refresh = 1 if known_posts and mode in {"run", "refresh"} else 0
-        refresh_events = known_posts if mode in {"run", "refresh"} else 0
+        refresh_events = min(known_posts, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
         return Plan("fixture", discovery, refresh_events, discovery + refresh, 0, "free fixture calls", ["No network calls or credentials are used."])
 
     def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
@@ -341,7 +341,7 @@ class FixtureProvider:
         selected = next((page for page in pages if page.get("request_after") == cursor), None)
         record = _request_record("discover", "fixture", 200, None, None, {"subreddit": subreddit, "cursor": cursor}, billed=False)
         if selected is None:
-            return PageResult([], cursor, None, observed, f"fixture://{subreddit}/new", 200, "fixture", gaps=[Gap("listing", "fixture_page_missing", subreddit=subreddit, detail=f"cursor={cursor!r}")], request_records=[record])
+            return PageResult([], cursor, None, observed, f"fixture://{subreddit}/new", 200, "fixture", gaps=[Gap("listing", "fixture_page_missing", subreddit=subreddit, detail=f"cursor={cursor!r}")], metadata={"request_failed": True, "checkpoint_deferred": True}, request_records=[record])
         raw_posts = selected.get("posts")
         posts, parse_gaps = _parse_post_items(raw_posts, default_subreddit=subreddit, observed_at=observed, include_comments=True)
         gaps = [Gap(**gap) for gap in selected.get("gaps", [])] + parse_gaps

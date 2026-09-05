@@ -47,6 +47,8 @@ class PostSnapshot:
     comments: list[CommentSnapshot] = field(default_factory=list)
     deletion_known: bool = False
     removal_known: bool = False
+    archived_known: bool = False
+    locked_known: bool = False
 
 
 @dataclass(slots=True)
