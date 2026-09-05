@@ -642,6 +642,28 @@ class IngestionTests(unittest.TestCase):
             self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in result.gaps))
             self.assertFalse(result.metadata["comments_expanded"])
 
+    def test_http_403_comment_failures_are_blocked_gaps(self) -> None:
+        class RedditApisClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 1}]}, HttpResponse(200, {}, b""), "post-request"
+                raise ProviderError("comment access denied", status=403, request_id="comment-request")
+
+        class FetchLayerClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/community-posts" in url:
+                    return {"items": [{"id": "p", "permalink": "/r/freelance/comments/p/post/", "num_comments": 1}]}, HttpResponse(200, {}, b""), "listing-request"
+                raise ProviderError("comment access denied", status=403, request_id="comment-request")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test", "FETCHLAYER_API_KEY": "test"}):
+            root = Path(directory)
+            reddit_config = config(root, provider="redditapis")
+            reddit_result = RedditApisProvider(reddit_config, client=RedditApisClient()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], reddit_config)
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "blocked" for gap in reddit_result.gaps))
+            fetch_config = config(root, provider="fetchlayer")
+            fetch_result = FetchLayerProvider(fetch_config, client=FetchLayerClient()).discover("freelance", None, fetch_config)
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "blocked" for gap in fetch_result.gaps))
+
     def test_partial_refresh_uses_known_comment_count_for_completeness(self) -> None:
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:

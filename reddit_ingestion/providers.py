@@ -43,6 +43,10 @@ class ProviderError(RuntimeError):
         self.attempts: list[RequestAttempt] = []
 
 
+def _provider_error_reason(error: ProviderError) -> str:
+    return "blocked" if error.status == 403 else "provider_error"
+
+
 class JsonTransport(Protocol):
     def __call__(self, method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float) -> HttpResponse: ...
 
@@ -540,7 +544,7 @@ class RedditApisProvider(HttpProviderBase):
                 payload, response, request_id = self.client.request("GET", url, headers={"Authorization": f"Bearer {key}"})
             except ProviderError as exc:
                 records.extend(_failed_request_records(self.client, "comments", url, exc, {"post_id": post.post_id, "mode": config.comments_mode}))
-                gaps.append(Gap("comment", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
+                gaps.append(Gap("comment", _provider_error_reason(exc), entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
                 break
             observed = utc_now()
             cache_status, cache_observed_at = _cache_info(payload)
@@ -592,7 +596,7 @@ class RedditApisProvider(HttpProviderBase):
                 payload, response, request_id = self.client.request("GET", url, headers={"Authorization": f"Bearer {key}"})
             except ProviderError as exc:
                 records.extend(_failed_request_records(self.client, "refresh", url, exc, {"post_count": len(batch)}))
-                gaps.extend(Gap("post", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for post in batch)
+                gaps.extend(Gap("post", _provider_error_reason(exc), entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for post in batch)
                 continue
             cache_status, cache_observed_at = _cache_info(payload)
             batch_records = _request_records(self.client, "refresh", request_id, response, cache_status, cache_observed_at, {"url": url, "post_count": len(batch)}, billed=_billing(cache_status))
@@ -752,7 +756,7 @@ class FetchLayerProvider(HttpProviderBase):
         except ProviderError as exc:
             records = _failed_request_records(self.client, operation, request_url, exc, {"post_id": post.post_id, "url": url, "payload": payload})
             entity_type = "comment" if operation == "comment_expansion" else "post"
-            return RefreshResult([], utc_now(), exc.request_id, exc.status, "unknown", None, gaps=[Gap(entity_type, "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc))], request_records=records)
+            return RefreshResult([], utc_now(), exc.request_id, exc.status, "unknown", None, gaps=[Gap(entity_type, _provider_error_reason(exc), entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc))], request_records=records)
         cache_status, cache_observed_at = _cache_info(response_payload)
         pages = response_payload.get("pagesRequested") or response_payload.get("pagesScraped") or 1
         try:
