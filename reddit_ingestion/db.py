@@ -184,14 +184,13 @@ class Database:
                 self._save_comment(comment, post.post_id, provider)
                 if comment.deleted or comment.removed:
                     page.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
-            if page.metadata.get("comments_expanded"):
-                self._prune_comments(post.post_id, post.comments)
         listing_status = page.metadata.get("listing_status")
         if listing_status in {"truncated", "unknown"}:
             page.gaps.append(Gap("listing", "truncated", subreddit=subreddit, detail=f"listing_status={listing_status}"))
         for gap in page.gaps:
             self._save_gap(run_id, provider, gap, page.observed_at, subreddit=subreddit)
-        if not page.metadata.get("request_failed"):
+        blocked = page.metadata.get("blocked") or any(gap.entity_type == "listing" and gap.reason == "blocked" for gap in page.gaps)
+        if not page.metadata.get("request_failed") and not page.metadata.get("checkpoint_deferred") and not blocked:
             self.connection.execute(
                 "INSERT INTO checkpoints(subreddit, cursor, page_count, observed_at, provider, source_url) VALUES (?, ?, 1, ?, ?, ?) ON CONFLICT(subreddit) DO UPDATE SET cursor=excluded.cursor, page_count=checkpoints.page_count+1, observed_at=excluded.observed_at, provider=excluded.provider, source_url=excluded.source_url",
                 (subreddit, page.next_cursor, page.observed_at, provider, page.source_url),
@@ -209,8 +208,6 @@ class Database:
                 self._save_comment(comment, post.post_id, provider)
                 if comment.deleted or comment.removed:
                     result.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
-            if result.metadata.get("comments_expanded"):
-                self._prune_comments(post.post_id, post.comments)
         for gap in result.gaps:
             self._save_gap(run_id, provider, gap, result.observed_at)
         self._save_request_records(run_id, provider, result.request_records, "refresh", result.request_id, result.response_status, result.cache_status, result.metadata)
@@ -251,16 +248,6 @@ class Database:
             ON CONFLICT(comment_id) DO UPDATE SET fullname=excluded.fullname, post_id=excluded.post_id, parent_id=excluded.parent_id, author=excluded.author, body=excluded.body, permalink=COALESCE(excluded.permalink, comments.permalink), created_at=COALESCE(excluded.created_at, comments.created_at), score=excluded.score, ups=excluded.ups, depth=excluded.depth, deleted=excluded.deleted, removed=excluded.removed, observed_at=excluded.observed_at, provider=excluded.provider, updated_at=excluded.updated_at""",
             (comment.comment_id, comment.fullname or f"t1_{comment.comment_id}", post_id, comment.parent_id, author, body, comment.permalink, comment.created_at, comment.score, comment.ups, comment.depth, deleted, removed, comment.observed_at, provider, comment.observed_at),
         )
-
-    def _prune_comments(self, post_id: str, comments: list[CommentSnapshot]) -> None:
-        if comments:
-            placeholders = ",".join("?" for _ in comments)
-            self.connection.execute(
-                f"DELETE FROM comments WHERE post_id = ? AND comment_id NOT IN ({placeholders})",
-                (post_id, *(comment.comment_id for comment in comments)),
-            )
-        else:
-            self.connection.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
 
     def _save_gap(self, run_id: str, provider: str, gap: Gap, observed_at: str, *, subreddit: str | None = None) -> None:
         self.connection.execute("INSERT INTO gaps(run_id, entity_type, entity_id, subreddit, reason, detail, observed_at, provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (run_id, gap.entity_type, gap.entity_id, gap.subreddit or subreddit, gap.reason, gap.detail, observed_at, provider))

@@ -50,8 +50,13 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str) -> Run
         if mode in {"run", "discover"}:
             for subreddit in config.subreddits:
                 checkpoint = db.checkpoint(subreddit)
-                cursor = checkpoint["cursor"] if checkpoint and checkpoint["provider"] == provider.name else None
-                for _page_number in range(config.max_discovery_pages):
+                resume_cursor = checkpoint["cursor"] if checkpoint and checkpoint["provider"] == provider.name else None
+                page_count = config.max_discovery_pages + (1 if resume_cursor else 0)
+                cursor: str | None = None
+                for page_number in range(page_count):
+                    resumed_page_number = page_number - 1 if resume_cursor else page_number
+                    if resume_cursor and page_number == 1:
+                        cursor = resume_cursor
                     try:
                         page = provider.discover(subreddit, cursor, config)
                     except ProviderError as exc:
@@ -74,13 +79,24 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str) -> Run
                         summary.requests += _request_units(page.request_records, page.request_id)
                         break
                     page.gaps.extend(apply_comment_policy(page.posts, config))
+                    if resume_cursor and page_number == 0:
+                        page.metadata["checkpoint_deferred"] = True
+                    blocked = page.metadata.get("blocked") or any(gap.entity_type == "listing" and gap.reason == "blocked" for gap in page.gaps)
+                    at_page_cap = resumed_page_number >= config.max_discovery_pages - 1
+                    if page.next_cursor and at_page_cap and not blocked and not any(gap.entity_type == "listing" and gap.reason == "truncated" for gap in page.gaps):
+                        page.gaps.append(Gap("listing", "truncated", subreddit=subreddit, detail=f"max_discovery_pages={config.max_discovery_pages}"))
                     with db.transaction():
                         discovered, comments = db.save_page(run_id, provider.name, subreddit, page)
                     summary.discovered += discovered
                     summary.comments += comments
                     summary.gaps += len(page.gaps)
                     summary.requests += _request_units(page.request_records, page.request_id)
-                    if not page.next_cursor or provider.name == "fetchlayer":
+                    if blocked:
+                        break
+                    if resume_cursor and page_number == 0:
+                        cursor = resume_cursor
+                        continue
+                    if not page.next_cursor or at_page_cap:
                         break
                     cursor = page.next_cursor
         if mode in {"run", "refresh"}:

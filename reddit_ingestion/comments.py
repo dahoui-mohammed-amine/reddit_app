@@ -4,6 +4,18 @@ from .config import Config
 from .models import Gap, PostSnapshot
 
 
+def comment_count_gap(post: PostSnapshot) -> Gap | None:
+    if post.num_comments is None or post.num_comments <= len(post.comments):
+        return None
+    return Gap(
+        "comment",
+        "unexpanded",
+        entity_id=post.post_id,
+        subreddit=post.subreddit,
+        detail=f"provider exposed {post.num_comments} comments but returned {len(post.comments)}",
+    )
+
+
 def apply_comment_policy(posts: list[PostSnapshot], config: Config) -> list[Gap]:
     gaps: list[Gap] = []
     if config.comments_mode == "off":
@@ -22,4 +34,7 @@ def apply_comment_policy(posts: list[PostSnapshot], config: Config) -> list[Gap]
             post.comments = kept
         elif config.comments_mode == "full":
             post.comments = original
+        count_gap = comment_count_gap(post)
+        if count_gap and not any(gap.entity_id == post.post_id and gap.reason == "unexpanded" for gap in gaps):
+            gaps.append(count_gap)
     return gaps

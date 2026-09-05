@@ -10,7 +10,7 @@ from unittest import mock
 from reddit_ingestion.comments import apply_comment_policy
 from reddit_ingestion.config import Config
 from reddit_ingestion.db import Database
-from reddit_ingestion.models import CommentSnapshot, PageResult, PostSnapshot
+from reddit_ingestion.models import CommentSnapshot, Gap, PageResult, PostSnapshot, RefreshResult
 from reddit_ingestion.normalize import parse_comment, parse_post
 from reddit_ingestion.providers import FetchLayerProvider, FixtureProvider, JsonClient, HttpResponse, ProviderError, RedditApisProvider
 from reddit_ingestion.runner import check_live_access, run_once
@@ -90,9 +90,9 @@ class IngestionTests(unittest.TestCase):
             resumed_page = provider.discover("freelance", "t3_freelance_next", cfg)
             self.assertEqual([post.post_id for post in resumed_page.posts], ["freelance002"])
             second = run_once(db, provider, cfg, "discover")
-            self.assertEqual(second.discovered, 3)
+            self.assertEqual(second.discovered, 4)
             self.assertEqual(db.counts()["posts"], 4)
-            self.assertEqual(db.counts()["post_observations"], 6)
+            self.assertEqual(db.counts()["post_observations"], 7)
             db.close()
 
     def test_historical_refresh_and_bounded_comment_gap(self) -> None:
@@ -111,6 +111,68 @@ class IngestionTests(unittest.TestCase):
             self.assertGreaterEqual(db.counts()["gaps"], 1)
             scores = [row[0] for row in db.connection.execute("SELECT score FROM post_observations WHERE post_id='freelance001' ORDER BY observation_id")]
             self.assertEqual(scores, [12, 15])
+            db.close()
+
+    def test_partial_comment_results_do_not_delete_existing_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            initial = PostSnapshot(
+                "p",
+                "t3_p",
+                "freelance",
+                num_comments=2,
+                observed_at=observed,
+                comments=[
+                    CommentSnapshot("c1", "t1_c1", "p", body="one", observed_at=observed),
+                    CommentSnapshot("c2", "t1_c2", "p", body="two", observed_at=observed),
+                ],
+            )
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([initial], None, None, observed, "fixture://p", 200, "fixture"))
+            partial = PostSnapshot(
+                "p",
+                "t3_p",
+                "freelance",
+                num_comments=2,
+                observed_at=observed,
+                comments=[CommentSnapshot("c1", "t1_c1", "p", body="updated", observed_at=observed)],
+            )
+            with db.transaction():
+                db.save_refresh(
+                    run_id,
+                    "fixture",
+                    RefreshResult([partial], observed, "refresh", 200, metadata={"comments_expanded": True}),
+                )
+            comment_ids = [row[0] for row in db.connection.execute("SELECT comment_id FROM comments ORDER BY comment_id")]
+            self.assertEqual(comment_ids, ["c1", "c2"])
+            db.close()
+
+    def test_blocked_listing_records_gap_without_advancing_checkpoint(self) -> None:
+        class BlockedProvider:
+            name = "fixture"
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                return PageResult(
+                    [],
+                    cursor,
+                    "blocked-next",
+                    "2026-09-05T00:00:00Z",
+                    "fixture://blocked",
+                    200,
+                    "fixture-request",
+                    gaps=[Gap("listing", "blocked", subreddit=subreddit)],
+                    metadata={"blocked": True},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "db.sqlite3")
+            summary = run_once(db, BlockedProvider(), config(Path(directory), comments="off"), "discover")
+            self.assertEqual(summary.gaps, 3)
+            self.assertIsNone(db.checkpoint("freelance"))
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='blocked'").fetchone()[0], 3)
             db.close()
 
     def test_deletion_clears_mutable_content_but_retains_identity(self) -> None:
@@ -139,6 +201,30 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(response.status, 200)
         self.assertEqual(len(calls), 3)
+
+    def test_retried_provider_request_persists_each_attempt_record(self) -> None:
+        calls: list[int] = []
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            calls.append(len(calls))
+            if len(calls) == 1:
+                return HttpResponse(503, {}, b'{"error":"temporary"}')
+            return HttpResponse(200, {}, b'{"posts":[{"id":"p","name":"t3_p","score":3}]}')
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis", comments="off")
+            client = JsonClient(timeout=1, retries=1, transport=transport, sleep=lambda _: None)
+            result = RedditApisProvider(cfg, client=client).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertEqual(len(result.request_records), 2)
+            self.assertEqual([record.metadata["attempt"] for record in result.request_records], [1, 2])
+            self.assertEqual([record.metadata["attempt_count"] for record in result.request_records], [2, 2])
+
+    def test_full_redditapis_plan_does_not_claim_bounded_comment_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis", comments="full")
+            plan = RedditApisProvider(cfg).plan(cfg, 100)
+            self.assertIsNone(plan.estimated_requests)
+            self.assertIsNone(plan.estimated_units)
 
     def test_json_client_paces_successive_requests(self) -> None:
         delays: list[float] = []
@@ -184,13 +270,19 @@ class IngestionTests(unittest.TestCase):
 
     def test_fetchlayer_full_comments_report_unsupported_without_calling_provider(self) -> None:
         class Client:
+            def __init__(self) -> None:
+                self.calls = 0
+
             def request(self, *args: object, **kwargs: object) -> tuple[dict[str, object], HttpResponse, str]:
-                raise AssertionError("full mode must not call the unsupported expansion")
+                self.calls += 1
+                return {"id": "p", "title": "Post", "score": 4, "num_comments": 5}, HttpResponse(200, {}, b""), "refresh-request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
             cfg = config(Path(directory), provider="fetchlayer", comments="full")
-            result = FetchLayerProvider(cfg, client=Client()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
-            self.assertEqual(result.request_records, [])
+            client = Client()
+            result = FetchLayerProvider(cfg, client=client).refresh_posts([PostSnapshot("p", "t3_p", "freelance", permalink="/r/freelance/comments/p/post/")], cfg)
+            self.assertEqual(client.calls, 1)
+            self.assertEqual(len(result.posts), 1)
             self.assertEqual(result.gaps[0].reason, "unexpanded")
 
     def test_discovery_provider_failure_persists_gap_without_checkpoint(self) -> None:

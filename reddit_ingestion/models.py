@@ -112,8 +112,8 @@ class Plan:
     provider: str
     discovery_requests: int
     refresh_events: int
-    estimated_requests: int
-    estimated_units: float
+    estimated_requests: int | None
+    estimated_units: float | None
     unit_label: str
     notes: list[str] = field(default_factory=list)
 
