@@ -1,0 +1,161 @@
+{
+  "listings": {
+    "freelance": [
+      {
+        "request_after": null,
+        "after": "t3_freelance_next",
+        "posts": [
+          {
+            "id": "freelance001",
+            "name": "t3_freelance001",
+            "subreddit": "freelance",
+            "title": "How do you price a small project?",
+            "selftext": "A client asked for a fixed price.",
+            "author": "fixture_author",
+            "permalink": "/r/freelance/comments/freelance001/pricing/",
+            "created_utc": "2026-09-04T10:00:00Z",
+            "score": 12,
+            "ups": 13,
+            "upvote_ratio": 0.94,
+            "num_comments": 2
+          }
+        ]
+      },
+      {
+        "request_after": "t3_freelance_next",
+        "after": null,
+        "posts": [
+          {
+            "id": "freelance002",
+            "name": "t3_freelance002",
+            "subreddit": "freelance",
+            "title": "Second page fixture",
+            "author": "fixture_author2",
+            "permalink": "/r/freelance/comments/freelance002/second/",
+            "created_utc": "2026-09-04T11:00:00Z",
+            "score": 4,
+            "ups": 4,
+            "upvote_ratio": 1.0,
+            "num_comments": 0
+          }
+        ]
+      }
+    ],
+    "smallbusiness": [
+      {
+        "request_after": null,
+        "after": null,
+        "posts": [
+          {
+            "id": "smallbusiness001",
+            "name": "t3_smallbusiness001",
+            "subreddit": "smallbusiness",
+            "title": "Fixture small business post",
+            "selftext": "Initial observation.",
+            "author": "fixture_owner",
+            "permalink": "/r/smallbusiness/comments/smallbusiness001/fixture/",
+            "created_utc": "2026-09-04T12:00:00Z",
+            "score": 8,
+            "ups": 8,
+            "upvote_ratio": 1.0,
+            "num_comments": 1
+          }
+        ]
+      }
+    ],
+    "SaaS": [
+      {
+        "request_after": null,
+        "after": null,
+        "posts": [
+          {
+            "id": "saas001",
+            "name": "t3_saas001",
+            "subreddit": "SaaS",
+            "title": "Fixture SaaS post",
+            "selftext": "Initial observation.",
+            "author": "fixture_builder",
+            "permalink": "/r/SaaS/comments/saas001/fixture/",
+            "created_utc": "2026-09-04T13:00:00Z",
+            "score": 20,
+            "ups": 21,
+            "upvote_ratio": 0.98,
+            "num_comments": 2
+          }
+        ]
+      }
+    ]
+  },
+  "refresh": {
+    "freelance001": {
+      "id": "freelance001",
+      "name": "t3_freelance001",
+      "subreddit": "freelance",
+      "title": "How do you price a small project?",
+      "selftext": "A client asked for a fixed price.",
+      "author": "fixture_author",
+      "permalink": "/r/freelance/comments/freelance001/pricing/",
+      "created_utc": "2026-09-04T10:00:00Z",
+      "score": 15,
+      "ups": 16,
+      "upvote_ratio": 0.95,
+      "num_comments": 3,
+      "comments": [
+        {
+          "id": "comment001",
+          "name": "t1_comment001",
+          "post_id": "freelance001",
+          "parent_id": "t3_freelance001",
+          "author": "commenter",
+          "body": "Quote the scope, not the hours.",
+          "permalink": "/r/freelance/comments/freelance001/pricing/comment001/",
+          "created_utc": "2026-09-04T10:10:00Z",
+          "score": 3,
+          "ups": 3,
+          "depth": 0
+        },
+        {
+          "id": "comment002",
+          "name": "t1_comment002",
+          "post_id": "freelance001",
+          "parent_id": "t1_comment001",
+          "author": "reply_author",
+          "body": "That has worked for me too.",
+          "permalink": "/r/freelance/comments/freelance001/pricing/comment002/",
+          "created_utc": "2026-09-04T10:15:00Z",
+          "score": 1,
+          "ups": 1,
+          "depth": 1
+        }
+      ]
+    },
+    "smallbusiness001": {
+      "id": "smallbusiness001",
+      "name": "t3_smallbusiness001",
+      "subreddit": "smallbusiness",
+      "title": "Fixture small business post",
+      "selftext": "Updated observation.",
+      "author": "fixture_owner",
+      "permalink": "/r/smallbusiness/comments/smallbusiness001/fixture/",
+      "created_utc": "2026-09-04T12:00:00Z",
+      "score": 10,
+      "ups": 10,
+      "upvote_ratio": 1.0,
+      "num_comments": 2
+    },
+    "saas001": {
+      "id": "saas001",
+      "name": "t3_saas001",
+      "subreddit": "SaaS",
+      "title": "Fixture SaaS post",
+      "selftext": "Initial observation.",
+      "author": "fixture_builder",
+      "permalink": "/r/SaaS/comments/saas001/fixture/",
+      "created_utc": "2026-09-04T13:00:00Z",
+      "score": 22,
+      "ups": 23,
+      "upvote_ratio": 0.97,
+      "num_comments": 3
+    }
+  }
+}

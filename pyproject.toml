@@ -1,0 +1,19 @@
+[project]
+name = "reddit-ingestion"
+version = "0.1.0"
+description = "Local-first, fixture-testable Reddit ingestion boundary"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+reddit-ingest = "reddit_ingestion.cli:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+include = ["reddit_ingestion*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
