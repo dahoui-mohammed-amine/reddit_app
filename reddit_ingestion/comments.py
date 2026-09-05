@@ -4,15 +4,16 @@ from .config import Config
 from .models import Gap, PostSnapshot
 
 
-def comment_count_gap(post: PostSnapshot) -> Gap | None:
-    if post.num_comments is None or post.num_comments <= len(post.comments):
+def comment_count_gap(post: PostSnapshot, *, expected_num_comments: int | None = None) -> Gap | None:
+    expected = post.num_comments if post.num_comments is not None else expected_num_comments
+    if expected is None or expected <= len(post.comments):
         return None
     return Gap(
         "comment",
         "unexpanded",
         entity_id=post.post_id,
         subreddit=post.subreddit,
-        detail=f"provider exposed {post.num_comments} comments but returned {len(post.comments)}",
+        detail=f"provider exposed {expected} comments but returned {len(post.comments)}",
     )
 
 

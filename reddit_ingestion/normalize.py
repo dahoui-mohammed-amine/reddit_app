@@ -120,6 +120,7 @@ def parse_post(
     default_subreddit: str | None = None,
     observed_at: str | None = None,
     include_comments: bool = True,
+    comment_errors: list[Exception] | None = None,
 ) -> PostSnapshot:
     observed = observed_at or utc_now()
     pid = post_id(raw)
@@ -149,5 +150,16 @@ def parse_post(
     if include_comments:
         comments = _value(raw, "comments")
         if isinstance(comments, list):
-            post.comments = [parse_comment(item, post=post, observed_at=observed) for item in comments if isinstance(item, Mapping)]
+            for item in comments:
+                if not isinstance(item, Mapping):
+                    if comment_errors is not None:
+                        comment_errors.append(TypeError("comment item is not an object"))
+                    continue
+                try:
+                    post.comments.append(parse_comment(item, post=post, observed_at=observed))
+                except (TypeError, ValueError) as exc:
+                    if comment_errors is not None:
+                        comment_errors.append(exc)
+        elif comments is not None and comment_errors is not None:
+            comment_errors.append(TypeError("comment collection is not a list"))
     return post

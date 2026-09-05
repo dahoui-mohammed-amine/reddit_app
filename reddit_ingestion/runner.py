@@ -116,7 +116,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str) -> Run
                     summary.comments += comments
                     summary.gaps += len(page.gaps)
                     summary.requests += _request_units(page.request_records, page.request_id)
-                    if blocked or provider_incomplete:
+                    if blocked or provider_incomplete or page.metadata.get("request_failed"):
                         break
                     if resume_cursor and page_number == 0:
                         cursor = resume_cursor

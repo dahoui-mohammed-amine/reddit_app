@@ -547,7 +547,7 @@ class IngestionTests(unittest.TestCase):
     def test_malformed_discovery_items_are_audited(self) -> None:
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
-                return {"posts": [{"title": "missing id"}]}, HttpResponse(200, {}, b""), f"request-{url.rsplit('=', 1)[-1]}"
+                return {"posts": [{"title": "missing id"}], "after": "next"}, HttpResponse(200, {}, b""), f"request-{url.rsplit('=', 1)[-1]}"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
             root = Path(directory)
@@ -558,7 +558,95 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(summary.requests, 3)
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM requests").fetchone()[0], 3)
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='provider_error'").fetchone()[0], 3)
+            self.assertIsNone(db.checkpoint("freelance"))
             db.close()
+
+    def test_malformed_discovery_page_stops_later_checkpoint(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                self.calls += 1
+                return {"posts": [{"title": "missing id"}], "after": "next"}, HttpResponse(200, {}, b""), f"request-{self.calls}"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root, provider="redditapis"), subreddits=("freelance",), max_discovery_pages=2)
+            client = Client()
+            run_once(db, RedditApisProvider(cfg, client=client), cfg, "discover")
+            self.assertEqual(client.calls, 1)
+            self.assertIsNone(db.checkpoint("freelance"))
+            db.close()
+
+    def test_fetchlayer_comment_failure_is_incomplete_comment_evidence(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/community-posts" in url:
+                    return {"items": [{"id": "p", "permalink": "/r/freelance/comments/p/post/", "num_comments": 1}]}, HttpResponse(200, {}, b""), "listing-request"
+                raise ProviderError("comment service unavailable", status=503, request_id="comment-request")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="fetchlayer")
+            result = FetchLayerProvider(cfg, client=Client()).discover("freelance", None, cfg)
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in result.gaps))
+            self.assertFalse(result.metadata["comments_expanded"])
+
+    def test_partial_refresh_uses_known_comment_count_for_completeness(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p"}]}, HttpResponse(200, {}, b""), "post-request"
+                return {"comments": []}, HttpResponse(200, {}, b""), "comment-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis")
+            result = RedditApisProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "freelance", num_comments=3)], cfg
+            )
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "unexpanded" for gap in result.gaps))
+            self.assertFalse(result.metadata["comments_expanded"])
+
+    def test_refresh_rejects_mismatched_fetchlayer_post_id(self) -> None:
+        class Client:
+            def request(self, *args: object, **kwargs: object) -> tuple[dict[str, object], HttpResponse, str]:
+                return {"id": "q", "name": "t3_q", "comments": []}, HttpResponse(200, {}, b""), "refresh-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="fetchlayer")
+            result = FetchLayerProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "freelance", permalink="/r/freelance/comments/p/post/")], cfg
+            )
+            self.assertEqual(result.posts, [])
+            self.assertTrue(any(gap.entity_id == "p" and gap.reason == "provider_error" for gap in result.gaps))
+
+    def test_fixture_inline_malformed_comment_preserves_post_and_records_gap(self) -> None:
+        fixture = {
+            "listings": {
+                "freelance": [
+                    {
+                        "request_after": None,
+                        "posts": [
+                            {
+                                "id": "p",
+                                "num_comments": 2,
+                                "comments": [{"id": "c", "body": "valid"}, {"body": "missing id"}],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "refresh": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture_path = root / "fixture.json"
+            fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+            page = FixtureProvider(fixture_path).discover("freelance", None, config(root))
+            self.assertEqual([post.post_id for post in page.posts], ["p"])
+            self.assertEqual([comment.comment_id for comment in page.posts[0].comments], ["c"])
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in page.gaps))
 
     def test_missing_discovery_collection_is_audited_without_checkpoint(self) -> None:
         class Client:
