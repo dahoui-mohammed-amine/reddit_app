@@ -68,26 +68,49 @@ def _removed(raw: Mapping[str, Any]) -> bool:
 
 
 def _state_known(raw: Mapping[str, Any], marker_keys: tuple[str, ...], content_keys: tuple[str, ...], values: set[str]) -> bool:
-    return any(key in raw for key in marker_keys) or any(raw[key] in values for key in content_keys if key in raw)
+    return any(key in raw and raw[key] is not None for key in marker_keys) or any(raw[key] in values for key in content_keys if key in raw)
+
+
+def _normalized_aliases(raw: Mapping[str, Any], keys: tuple[str, ...], prefix: str, label: str, *, require_prefix: bool = False) -> str | None:
+    values: list[str] = []
+    for key in keys:
+        if key not in raw or raw[key] is None:
+            continue
+        value = str(raw[key])
+        if not value:
+            raise ValueError(f"{label} is empty")
+        if require_prefix and not value.startswith(prefix):
+            raise ValueError(f"{label} must use {prefix} fullname")
+        normalized = value.removeprefix(prefix)
+        if not normalized:
+            raise ValueError(f"{label} is empty")
+        values.append(normalized)
+    if values and any(value != values[0] for value in values[1:]):
+        raise ValueError(f"{label} aliases disagree")
+    return values[0] if values else None
 
 
 def post_id(raw: Mapping[str, Any]) -> str:
-    value = _value(raw, "id", "post_id")
-    if value:
-        return str(value).removeprefix("t3_")
-    fullname = _text(_value(raw, "fullname", "name"))
-    if fullname and fullname.startswith("t3_"):
-        return fullname[3:]
+    value = _normalized_aliases(raw, ("id", "post_id"), "t3_", "post id")
+    fullname = _normalized_aliases(raw, ("fullname", "name"), "t3_", "post fullname", require_prefix=True)
+    if value and fullname and value != fullname:
+        raise ValueError("post id and fullname disagree")
+    if value is not None:
+        return value
+    if fullname is not None:
+        return fullname
     raise ValueError("post is missing id or t3_ fullname")
 
 
 def comment_id(raw: Mapping[str, Any]) -> str:
-    value = _value(raw, "id", "comment_id")
-    if value:
-        return str(value).removeprefix("t1_")
-    fullname = _text(_value(raw, "fullname", "name"))
-    if fullname and fullname.startswith("t1_"):
-        return fullname[3:]
+    value = _normalized_aliases(raw, ("id", "comment_id"), "t1_", "comment id")
+    fullname = _normalized_aliases(raw, ("fullname", "name"), "t1_", "comment fullname", require_prefix=True)
+    if value and fullname and value != fullname:
+        raise ValueError("comment id and fullname disagree")
+    if value is not None:
+        return value
+    if fullname is not None:
+        return fullname
     raise ValueError("comment is missing id or t1_ fullname")
 
 
@@ -150,13 +173,17 @@ def parse_post(
     if include_comments:
         comments = _value(raw, "comments")
         if isinstance(comments, list):
+            seen_comment_ids: set[str] = set()
             for item in comments:
                 if not isinstance(item, Mapping):
                     if comment_errors is not None:
                         comment_errors.append(TypeError("comment item is not an object"))
                     continue
                 try:
-                    post.comments.append(parse_comment(item, post=post, observed_at=observed))
+                    comment = parse_comment(item, post=post, observed_at=observed)
+                    if comment.comment_id not in seen_comment_ids:
+                        seen_comment_ids.add(comment.comment_id)
+                        post.comments.append(comment)
                 except (TypeError, ValueError) as exc:
                     if comment_errors is not None:
                         comment_errors.append(exc)

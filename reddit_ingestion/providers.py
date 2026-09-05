@@ -43,10 +43,6 @@ class ProviderError(RuntimeError):
         self.attempts: list[RequestAttempt] = []
 
 
-def _provider_error_reason(error: ProviderError) -> str:
-    return "blocked" if error.status == 403 else "provider_error"
-
-
 class JsonTransport(Protocol):
     def __call__(self, method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float) -> HttpResponse: ...
 
@@ -115,6 +111,7 @@ class JsonClient:
             try:
                 parsed = json.loads(response.body.decode("utf-8")) if response.body else {}
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self.last_attempts[-1].billed = None
                 error = ProviderError(f"provider returned non-JSON response with status {response.status}", status=response.status, retryable=response.status >= 500, request_id=request_id, url=url)
                 error.attempts = list(self.last_attempts)
                 raise error from exc
@@ -130,6 +127,7 @@ class JsonClient:
                 error.attempts = list(self.last_attempts)
                 raise error
             if not isinstance(parsed, dict):
+                self.last_attempts[-1].billed = None
                 error = ProviderError("provider response must be a JSON object", status=response.status, request_id=request_id, url=url)
                 error.attempts = list(self.last_attempts)
                 raise error
@@ -290,13 +288,17 @@ def _parse_comment_items(items: Any, *, post: PostSnapshot, observed_at: str) ->
     if not isinstance(items, list):
         return [], [_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail="comment collection is not a list")]
     comments: list[Any] = []
+    seen_comment_ids: set[str] = set()
     gaps: list[Gap] = []
     for item in items:
         if not isinstance(item, Mapping):
             gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail="comment item is not an object"))
             continue
         try:
-            comments.append(parse_comment(item, post=post, observed_at=observed_at))
+            comment = parse_comment(item, post=post, observed_at=observed_at)
+            if comment.comment_id not in seen_comment_ids:
+                seen_comment_ids.add(comment.comment_id)
+                comments.append(comment)
         except (TypeError, ValueError) as exc:
             gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
     return comments, gaps
@@ -544,11 +546,14 @@ class RedditApisProvider(HttpProviderBase):
                 payload, response, request_id = self.client.request("GET", url, headers={"Authorization": f"Bearer {key}"})
             except ProviderError as exc:
                 records.extend(_failed_request_records(self.client, "comments", url, exc, {"post_id": post.post_id, "mode": config.comments_mode}))
-                gaps.append(Gap("comment", _provider_error_reason(exc), entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
+                gaps.append(Gap("comment", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
                 break
             observed = utc_now()
             cache_status, cache_observed_at = _cache_info(payload)
             records.extend(_request_records(self.client, "comments", request_id, response, cache_status, cache_observed_at, {"url": url, "post_id": post.post_id, "mode": config.comments_mode}, billed=_billing(cache_status)))
+            if payload.get("blocked"):
+                gaps.append(Gap("comment", "blocked", entity_id=post.post_id, subreddit=post.subreddit, detail=str(payload.get("blockReason"))))
+                break
             if "comments" not in payload:
                 gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="provider response is missing comment collection"))
                 break
@@ -596,12 +601,15 @@ class RedditApisProvider(HttpProviderBase):
                 payload, response, request_id = self.client.request("GET", url, headers={"Authorization": f"Bearer {key}"})
             except ProviderError as exc:
                 records.extend(_failed_request_records(self.client, "refresh", url, exc, {"post_count": len(batch)}))
-                gaps.extend(Gap("post", _provider_error_reason(exc), entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for post in batch)
+                gaps.extend(Gap("post", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for post in batch)
                 continue
             cache_status, cache_observed_at = _cache_info(payload)
             batch_records = _request_records(self.client, "refresh", request_id, response, cache_status, cache_observed_at, {"url": url, "post_count": len(batch)}, billed=_billing(cache_status))
             records.extend(batch_records)
             record = batch_records[-1]
+            if payload.get("blocked"):
+                gaps.extend(Gap("post", "blocked", entity_id=post.post_id, subreddit=post.subreddit, detail=str(payload.get("blockReason"))) for post in batch)
+                continue
             returned: dict[str, Mapping[str, Any]] = {}
             raw_posts = payload.get("posts", [])
             if not isinstance(raw_posts, list):
@@ -756,7 +764,7 @@ class FetchLayerProvider(HttpProviderBase):
         except ProviderError as exc:
             records = _failed_request_records(self.client, operation, request_url, exc, {"post_id": post.post_id, "url": url, "payload": payload})
             entity_type = "comment" if operation == "comment_expansion" else "post"
-            return RefreshResult([], utc_now(), exc.request_id, exc.status, "unknown", None, gaps=[Gap(entity_type, _provider_error_reason(exc), entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc))], request_records=records)
+            return RefreshResult([], utc_now(), exc.request_id, exc.status, "unknown", None, gaps=[Gap(entity_type, "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc))], request_records=records)
         cache_status, cache_observed_at = _cache_info(response_payload)
         pages = response_payload.get("pagesRequested") or response_payload.get("pagesScraped") or 1
         try:

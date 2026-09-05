@@ -9,7 +9,7 @@ from .config import Config
 from .db import Database
 from .models import Gap, PageResult, Plan, RefreshResult, RunSummary, RequestRecord
 from .normalize import utc_now
-from .providers import Provider, ProviderError, _failed_request_records, _provider_error_reason
+from .providers import Provider, ProviderError, _failed_request_records
 
 
 def config_dict(config: Config) -> dict[str, Any]:
@@ -71,7 +71,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                             response_status=exc.status,
                             request_id=exc.request_id,
                             cache_status="unknown" if exc.request_id else None,
-                            gaps=[Gap("listing", _provider_error_reason(exc), subreddit=subreddit, detail=str(exc))],
+                            gaps=[Gap("listing", "provider_error", subreddit=subreddit, detail=str(exc))],
                             metadata={"request_failed": True, "error": str(exc)},
                             request_records=_failed_request_records(None, "discover", exc.url or "", exc),
                         )
@@ -118,7 +118,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                         request_id=exc.request_id,
                         response_status=exc.status,
                         cache_status="unknown" if exc.request_id else None,
-                        gaps=[Gap("post", _provider_error_reason(exc), entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for post in due],
+                        gaps=[Gap("post", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for post in due],
                         metadata={"request_failed": True, "error": str(exc)},
                         request_records=_failed_request_records(None, "refresh", exc.url or "", exc),
                     )

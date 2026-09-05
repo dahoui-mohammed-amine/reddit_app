@@ -64,6 +64,15 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(post.score, 7)
         self.assertEqual(post.num_comments, 2)
 
+    def test_normalization_rejects_empty_and_conflicting_ids(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_post({"id": "t3_"})
+        with self.assertRaises(ValueError):
+            parse_post({"id": "p", "name": "t3_q"})
+        post = parse_post({"id": "p"})
+        with self.assertRaises(ValueError):
+            parse_comment({"id": "t1_"}, post=post, observed_at=post.observed_at)
+
     def test_normalization_recognizes_deleted_content_markers(self) -> None:
         post = parse_post({"id": "deleted", "author": None, "selftext": "[deleted]"})
         comment = parse_comment({"id": "comment", "author": None, "body": "[deleted]"}, post=post, observed_at=post.observed_at)
@@ -294,6 +303,10 @@ class IngestionTests(unittest.TestCase):
             row = db.connection.execute("SELECT deleted, score FROM posts WHERE post_id='p'").fetchone()
             self.assertEqual(tuple(row), (1, 5))
             self.assertEqual(db.purge_deleted_content(), 1)
+            unknown = parse_post({"id": "p", "deleted": None, "score": 5, "num_comments": 0}, default_subreddit="freelance", observed_at=observed)
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", RefreshResult([unknown], observed, "refresh", 200))
+            self.assertEqual(db.connection.execute("SELECT deleted FROM posts WHERE post_id='p'").fetchone()[0], 1)
             cleared = parse_post({"id": "p", "deleted": False, "score": 6, "num_comments": 0}, default_subreddit="freelance", observed_at=observed)
             with db.transaction():
                 db.save_refresh(run_id, "fixture", RefreshResult([cleared], observed, "refresh", 200))
@@ -511,6 +524,12 @@ class IngestionTests(unittest.TestCase):
         self.assertTrue(context.exception.retryable)
         self.assertTrue(context.exception.billed)
 
+    def test_json_client_marks_malformed_success_billing_unknown(self) -> None:
+        client = JsonClient(timeout=1, retries=0, transport=lambda *args: HttpResponse(200, {}, b"not-json"), sleep=lambda _: None)
+        with self.assertRaises(ProviderError) as context:
+            client.request("GET", "https://example.test", headers={})
+        self.assertIsNone(context.exception.attempts[-1].billed)
+
     def test_live_provider_requires_access_and_explicit_cost_consent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(os.environ, {}, clear=True):
@@ -593,6 +612,20 @@ class IngestionTests(unittest.TestCase):
             self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
             self.assertFalse(result.metadata["comments_expanded"])
 
+    def test_fetchlayer_comment_ids_are_deduplicated_before_counting(self) -> None:
+        class Client:
+            def request(self, *args: object, **kwargs: object) -> tuple[dict[str, object], HttpResponse, str]:
+                comment = {"id": "c", "name": "t1_c", "body": "Comment"}
+                return {"id": "p", "name": "t3_p", "num_comments": 2, "comments": [comment, comment]}, HttpResponse(200, {}, b""), "refresh-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="fetchlayer")
+            result = FetchLayerProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "freelance", permalink="/r/freelance/comments/p/post/")], cfg
+            )
+            self.assertEqual(len(result.posts[0].comments), 1)
+            self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
+
     def test_malformed_discovery_items_are_audited(self) -> None:
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
@@ -642,7 +675,7 @@ class IngestionTests(unittest.TestCase):
             self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in result.gaps))
             self.assertFalse(result.metadata["comments_expanded"])
 
-    def test_http_403_comment_failures_are_blocked_gaps(self) -> None:
+    def test_http_403_comment_failures_remain_provider_errors(self) -> None:
         class RedditApisClient:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
                 if "/by_id/" in url:
@@ -659,10 +692,29 @@ class IngestionTests(unittest.TestCase):
             root = Path(directory)
             reddit_config = config(root, provider="redditapis")
             reddit_result = RedditApisProvider(reddit_config, client=RedditApisClient()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], reddit_config)
-            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "blocked" for gap in reddit_result.gaps))
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in reddit_result.gaps))
             fetch_config = config(root, provider="fetchlayer")
             fetch_result = FetchLayerProvider(fetch_config, client=FetchLayerClient()).discover("freelance", None, fetch_config)
-            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "blocked" for gap in fetch_result.gaps))
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in fetch_result.gaps))
+
+    def test_redditapis_blocked_payloads_are_blocked_gaps(self) -> None:
+        class BlockedRefreshClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                return {"blocked": True, "blockReason": "access denied"}, HttpResponse(200, {}, b""), "refresh-request"
+
+        class BlockedCommentsClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 1}]}, HttpResponse(200, {}, b""), "post-request"
+                return {"blocked": True, "blockReason": "comments denied"}, HttpResponse(200, {}, b""), "comment-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis")
+            post = PostSnapshot("p", "t3_p", "freelance")
+            refresh = RedditApisProvider(cfg, client=BlockedRefreshClient()).refresh_posts([post], cfg)
+            self.assertTrue(any(gap.entity_type == "post" and gap.reason == "blocked" for gap in refresh.gaps))
+            comments = RedditApisProvider(cfg, client=BlockedCommentsClient()).refresh_posts([post], cfg)
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "blocked" for gap in comments.gaps))
 
     def test_partial_refresh_uses_known_comment_count_for_completeness(self) -> None:
         class Client:
