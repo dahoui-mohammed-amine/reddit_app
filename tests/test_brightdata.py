@@ -385,6 +385,19 @@ class BrightDataTests(unittest.TestCase):
         self.assertIsNone(metadata["provider_error"])
         self.assertTrue(metadata["provider_payload_present"])
 
+    def test_unmatched_specific_discovery_error_defers_checkpoint(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [{"url": "https://www.reddit.com/r/other/", "error": "provider failure"}], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+        self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+        self.assertTrue(result.metadata["checkpoint_deferred"])
+        self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
+
     def test_202_snapshot_is_a_safe_unsupported_result_without_followup(self) -> None:
         calls: list[int] = []
 

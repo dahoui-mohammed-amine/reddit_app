@@ -1347,10 +1347,19 @@ class BrightDataProvider(HttpProviderBase):
                         continue
                     by_subreddit[key].append(raw)
                 self._update_accounting(request_records, returned_records=returned_count, provider_error_count=len(errors))
+        batch_urls = [f"https://www.reddit.com/r/{subreddit}/" for subreddit in batch]
+        unmatched_specific_errors = [
+            item
+            for item in errors
+            if isinstance(item, Mapping)
+            and not self._error_matches(item, None)
+            and not any(self._error_matches(item, target_url) for target_url in batch_urls)
+        ]
         for key, raw_items in by_subreddit.items():
             subreddit = next(item for item in batch if self._subreddit_key(item) == key)
             target_url = f"https://www.reddit.com/r/{subreddit}/"
             target_errors = self._error_list_for_target(errors, target_url) if error is None else []
+            target_errors.extend(unmatched_specific_errors)
             posts, parse_gaps = _parse_post_items(
                 [dict(raw, subreddit=subreddit) for raw in raw_items],
                 default_subreddit=subreddit,
