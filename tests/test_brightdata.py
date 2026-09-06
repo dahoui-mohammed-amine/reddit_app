@@ -177,6 +177,33 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(tuple(saved_post), ("A post", "[deleted]", "[removed]", 0, 0))
         self.assertEqual(tuple(saved_comment), ("[removed]", "[deleted]", 0, 0))
 
+    def test_brightdata_explicit_state_markers_are_report_only(self) -> None:
+        raw = post_record("smallbusiness")
+        raw.update({"deleted": True, "removed": True})
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [raw], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            root = Path(directory)
+            cfg = config(root)
+            page = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+            db = Database(cfg.database_path)
+            try:
+                run_id = db.start_run("brightdata", "discover", {}, OBSERVED)
+                with db.transaction():
+                    db.save_page(run_id, "brightdata", "smallbusiness", page)
+                saved = db.connection.execute("SELECT title, body, author, deleted, removed FROM posts WHERE post_id='p'").fetchone()
+            finally:
+                db.close()
+
+        self.assertFalse(page.posts[0].deleted)
+        self.assertFalse(page.posts[0].removed)
+        self.assertTrue(any(gap.reason == "deleted" and gap.entity_id == "p" for gap in page.gaps))
+        self.assertTrue(any(gap.reason == "removed" and gap.entity_id == "p" for gap in page.gaps))
+        self.assertEqual(tuple(saved), ("A post", "A description", "author", 0, 0))
+
     def test_sparse_records_are_valid_but_deleted_like_partial_errors_are_unavailable(self) -> None:
         sparse = {"post_id": "sparse", "url": "https://www.reddit.com/r/smallbusiness/comments/sparse/title/", "num_comments": 0}
         deleted_error = {"url": "https://www.reddit.com/r/freelance/", "error": "deleted post"}

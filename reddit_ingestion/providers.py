@@ -307,12 +307,30 @@ def _malformed_gap(entity_type: str, *, entity_id: str | None = None, subreddit:
     return Gap(entity_type, "provider_error", entity_id=entity_id, subreddit=subreddit, detail=f"malformed provider payload: {detail}")
 
 
+def _report_only_state_gaps(raw: Mapping[str, Any], *, entity_id: str, subreddit: str | None) -> list[Gap]:
+    gaps: list[Gap] = []
+    for reason, keys in (("deleted", ("deleted", "is_deleted")), ("removed", ("removed", "is_removed", "removed_by_category"))):
+        markers = [key for key in keys if raw.get(key) not in (None, "", False)]
+        if markers:
+            gaps.append(
+                Gap(
+                    "post",
+                    reason,
+                    entity_id=entity_id,
+                    subreddit=subreddit,
+                    detail=f"Bright Data {reason} markers are report-only: {', '.join(markers)}",
+                )
+            )
+    return gaps
+
+
 def _parse_post_items(
     items: Any,
     *,
     default_subreddit: str | None,
     observed_at: str,
     include_comments: bool,
+    detect_deletion_state: bool = True,
 ) -> tuple[list[PostSnapshot], list[Gap]]:
     if not isinstance(items, list):
         return [], [_malformed_gap("listing", subreddit=default_subreddit, detail="post collection is not a list")]
@@ -331,6 +349,7 @@ def _parse_post_items(
                 observed_at=observed_at,
                 include_comments=include_comments,
                 comment_errors=comment_errors,
+                detect_deletion_state=detect_deletion_state,
             )
         except (TypeError, ValueError) as exc:
             gaps.append(_malformed_gap("post", subreddit=default_subreddit, detail=str(exc)))
@@ -351,6 +370,8 @@ def _parse_post_items(
             post.subreddit = default_subreddit
         seen_post_ids.add(post.post_id)
         posts.append(post)
+        if not detect_deletion_state:
+            gaps.extend(_report_only_state_gaps(item, entity_id=post.post_id, subreddit=post.subreddit))
         gaps.extend(
             _malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc))
             for exc in comment_errors
@@ -1313,6 +1334,7 @@ class BrightDataProvider(HttpProviderBase):
                 default_subreddit=subreddit,
                 observed_at=fetched_at,
                 include_comments=False,
+                detect_deletion_state=False,
             )
             if config.comments_mode in {"bounded", "full"}:
                 parse_gaps.extend(self._comments_unsupported_gap(post, config.comments_mode) for post in posts)
@@ -1495,6 +1517,7 @@ class BrightDataProvider(HttpProviderBase):
                         default_subreddit=post.subreddit,
                         observed_at=fetched_at,
                         include_comments=False,
+                        detect_deletion_state=False,
                     )
                 except (TypeError, ValueError) as exc:
                     gaps.append(_malformed_gap("post", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
@@ -1502,6 +1525,7 @@ class BrightDataProvider(HttpProviderBase):
                 if refreshed.post_id != post.post_id:
                     gaps.append(_id_mismatch_gap("post", post.post_id, refreshed.post_id, post.subreddit))
                     continue
+                gaps.extend(_report_only_state_gaps(raw, entity_id=post.post_id, subreddit=post.subreddit))
                 if config.comments_mode in {"bounded", "full"}:
                     gaps.append(self._comments_unsupported_gap(refreshed, config.comments_mode))
                 count_gap = comment_count_gap(refreshed, expected_num_comments=post.num_comments)

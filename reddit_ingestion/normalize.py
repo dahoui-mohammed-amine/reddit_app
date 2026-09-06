@@ -171,7 +171,13 @@ def _parent_id(raw: Mapping[str, Any]) -> str | None:
     return values[0] if values else None
 
 
-def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed_at: str) -> CommentSnapshot:
+def parse_comment(
+    raw: Mapping[str, Any],
+    *,
+    post: PostSnapshot | None,
+    observed_at: str,
+    detect_deletion_state: bool = True,
+) -> CommentSnapshot:
     cid = comment_id(raw)
     linked_post_id = _comment_link_id(raw)
     if post is not None and linked_post_id is not None and linked_post_id != post.post_id:
@@ -191,12 +197,12 @@ def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed
         created_at=_text(_value(raw, "created_at_iso", "createdAt", "created_utc", "created", "date_posted", validator=_valid_source_time)),
         score=_int(_value(raw, "score", "points", "num_upvotes")),
         ups=_int(_value(raw, "ups", "upvotes", "num_upvotes")),
-        deleted=_deleted(raw),
-        removed=_removed(raw),
+        deleted=_deleted(raw) if detect_deletion_state else False,
+        removed=_removed(raw) if detect_deletion_state else False,
         depth=_int(_value(raw, "depth")),
         observed_at=observed_at,
-        deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "text"), {"[deleted]", "deleted"}),
-        removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "text"), {"[removed]", "removed"}),
+        deletion_known=detect_deletion_state and _state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "text"), {"[deleted]", "deleted"}),
+        removal_known=detect_deletion_state and _state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "text"), {"[removed]", "removed"}),
     )
 
 
@@ -207,6 +213,7 @@ def parse_post(
     observed_at: str | None = None,
     include_comments: bool = True,
     comment_errors: list[Exception] | None = None,
+    detect_deletion_state: bool = True,
 ) -> PostSnapshot:
     observed = observed_at or utc_now()
     pid = post_id(raw)
@@ -227,11 +234,11 @@ def parse_post(
         num_comments=_int(_value(raw, "num_comments", "commentCount", "comment_count", validator=_valid_nonnegative_int)),
         archived=_bool(_value(raw, "archived")),
         locked=_bool(_value(raw, "locked")),
-        deleted=_deleted(raw),
-        removed=_removed(raw),
+        deleted=_deleted(raw) if detect_deletion_state else False,
+        removed=_removed(raw) if detect_deletion_state else False,
         observed_at=observed,
-        deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "selftext", "text"), {"[deleted]", "deleted"}),
-        removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "selftext"), {"[removed]", "removed"}),
+        deletion_known=detect_deletion_state and _state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "selftext", "text"), {"[deleted]", "deleted"}),
+        removal_known=detect_deletion_state and _state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "selftext"), {"[removed]", "removed"}),
         archived_known=raw.get("archived") not in (None, ""),
         locked_known=raw.get("locked") not in (None, ""),
     )
@@ -245,7 +252,7 @@ def parse_post(
                         comment_errors.append(TypeError("comment item is not an object"))
                     continue
                 try:
-                    comment = parse_comment(item, post=post, observed_at=observed)
+                    comment = parse_comment(item, post=post, observed_at=observed, detect_deletion_state=detect_deletion_state)
                     if comment.comment_id not in seen_comment_ids:
                         seen_comment_ids.add(comment.comment_id)
                         post.comments.append(comment)
