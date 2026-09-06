@@ -17,7 +17,7 @@ from reddit_ingestion.runner import run_once
 OBSERVED = "2026-09-06T00:00:00Z"
 
 
-def config(root: Path, *, comments: str = "bounded", limit: int = 2, subreddits: tuple[str, ...] = ("smallbusiness", "freelance")) -> Config:
+def config(root: Path, *, comments: str = "full", limit: int = 2, subreddits: tuple[str, ...] = ("smallbusiness", "freelance")) -> Config:
     return Config(
         subreddits=subreddits,
         database_path=root / "reddit.sqlite3",
@@ -92,7 +92,7 @@ class BrightDataTests(unittest.TestCase):
                 return [], HttpResponse(200, {}, b""), "request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
-            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            cfg = config(Path(directory), comments="bounded", subreddits=("smallbusiness",))
             page = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
 
         self.assertEqual(page.posts, [])
@@ -100,6 +100,26 @@ class BrightDataTests(unittest.TestCase):
         self.assertFalse(page.metadata["comments_expanded"])
         self.assertTrue(page.metadata["request_failed"])
         self.assertTrue(page.metadata["checkpoint_deferred"])
+
+    def test_nonempty_discovery_rejects_bounded_comments_before_checkpoint(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [post_record("smallbusiness")], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            root = Path(directory)
+            cfg = config(root, comments="bounded", subreddits=("smallbusiness",))
+            db = Database(cfg.database_path)
+            try:
+                summary = run_once(db, BrightDataProvider(cfg, client=Client()), cfg, "discover", allow_paid=True)
+                stored = db.connection.execute("SELECT post_id FROM posts").fetchall()
+                checkpoint = db.checkpoint("smallbusiness")
+            finally:
+                db.close()
+
+        self.assertEqual(summary.discovered, 0)
+        self.assertEqual(stored, [])
+        self.assertIsNone(checkpoint)
 
     def test_discovery_rejects_duplicate_post_ids_across_subreddits(self) -> None:
         class Client:
@@ -311,7 +331,7 @@ class BrightDataTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
             root = Path(directory)
-            cfg = config(root, limit=1)
+            cfg = config(root, comments="bounded", limit=1)
             result = BrightDataProvider(cfg, client=Client()).refresh_posts(
                 [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
             )
@@ -656,8 +676,26 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(page.request_records[0].metadata["accounting"]["returned_records"], 0)
         self.assertEqual(result.posts, [])
         self.assertTrue(any(gap.reason == "unsupported" for gap in result.gaps))
+        self.assertTrue(result.metadata["request_failed"])
+        self.assertFalse(result.metadata["comments_expanded"])
         self.assertEqual(result.request_records[0].metadata["raw_payload"], [post_record("smallbusiness")])
         self.assertEqual(result.request_records[0].metadata["accounting"]["returned_records"], 0)
+
+    def test_refresh_snapshot_marks_result_incomplete_without_followup(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return {"snapshot_id": "s_123"}, HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertEqual(result.posts, [])
+        self.assertTrue(any(gap.reason == "unsupported" for gap in result.gaps))
+        self.assertTrue(result.metadata["request_failed"])
+        self.assertFalse(result.metadata["comments_expanded"])
 
     def test_202_object_envelopes_are_malformed(self) -> None:
         class Client:

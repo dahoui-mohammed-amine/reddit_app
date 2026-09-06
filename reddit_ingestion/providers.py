@@ -1470,17 +1470,9 @@ class BrightDataProvider(HttpProviderBase):
                 gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail="provider returned a discovery record that could not be attributed to a requested subreddit"))
             if key in duplicate_subreddits:
                 gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail="provider returned duplicate post identity across discovery inputs"))
-            bounded_comments_empty = (
-                config.comments_mode == "bounded"
-                and not posts
-                and error is None
-                and not deferred_202
-                and snapshot_id is None
-                and malformed_shape is None
-                and not errors
-                and returned_count == 0
-            )
-            if bounded_comments_empty:
+            bounded_comments_unsupported = config.comments_mode == "bounded"
+            if bounded_comments_unsupported:
+                posts = []
                 gaps.append(
                     Gap(
                         "comment",
@@ -1490,7 +1482,7 @@ class BrightDataProvider(HttpProviderBase):
                     )
                 )
             gaps.extend(self._provider_gap("listing", entity_id=None, subreddit=subreddit, error=item) for item in target_errors)
-            request_failed = error is not None or bool(raw_items and any(gap.entity_type == "post" for gap in parse_gaps)) or bool(target_errors) or bounded_comments_empty or any(gap.entity_type == "listing" and gap.reason in {"provider_error", "unavailable", "unsupported"} for gap in gaps)
+            request_failed = error is not None or bool(raw_items and any(gap.entity_type == "post" for gap in parse_gaps)) or bool(target_errors) or bounded_comments_unsupported or any(gap.entity_type == "listing" and gap.reason in {"provider_error", "unavailable", "unsupported"} for gap in gaps)
             metadata = {
                 "dataset_id": self.posts_dataset_id,
                 "fetched_at": fetched_at,
@@ -1624,6 +1616,7 @@ class BrightDataProvider(HttpProviderBase):
                 gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=error.provider_payload if error.provider_payload is not None else str(error), status=error.status) for post, _ in batch)
                 continue
             if response is not None and response.status == 202:
+                batch_request_failed = True
                 if self._is_deferred_payload(payload):
                     self._update_accounting(request_records, returned_records=0, provider_error_count=0)
                     snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
@@ -1640,6 +1633,7 @@ class BrightDataProvider(HttpProviderBase):
                 continue
             raw_items, errors, shape = self._records_and_errors(payload)
             if shape == "snapshot":
+                batch_request_failed = True
                 self._update_accounting(request_records, returned_records=0, provider_error_count=0)
                 snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
                 gaps.extend(Gap("post", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail=f"Bright Data returned async snapshot {snapshot_id!r}; snapshot polling is not enabled") for post, _ in batch)
@@ -1745,9 +1739,10 @@ class BrightDataProvider(HttpProviderBase):
             )
         primary = next((record for record in records if record.operation == "refresh"), None)
         provider_error_count = sum(int(record.metadata.get("provider_error_count", 0)) for record in records)
+        request_failed = batch_request_failed or provider_error_count > 0 or malformed_item_count > 0 or malformed_response_count > 0 or downstream_provider_error_count > 0
         metadata = {
             "comments_mode": config.comments_mode,
-            "comments_expanded": _comments_complete(gaps),
+            "comments_expanded": _comments_complete(gaps) and not request_failed,
             "no_automatic_retries": True,
             "post_dataset_id": self.posts_dataset_id,
             "comment_dataset_id": self.comments_dataset_id,
@@ -1756,7 +1751,7 @@ class BrightDataProvider(HttpProviderBase):
             "malformed_record_count": malformed_item_count,
             "malformed_response_count": malformed_response_count,
             "provider_error_count": provider_error_count,
-            "request_failed": batch_request_failed or provider_error_count > 0 or malformed_item_count > 0 or malformed_response_count > 0 or downstream_provider_error_count > 0,
+            "request_failed": request_failed,
         }
         return RefreshResult(
             all_posts,
