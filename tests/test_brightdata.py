@@ -301,6 +301,36 @@ class BrightDataTests(unittest.TestCase):
 
         self.assertEqual(result.posts, [])
         self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+        self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
+
+    def test_discovery_normalization_rejection_is_counted(self) -> None:
+        raw = post_record("smallbusiness")
+        raw["title"] = ["not scalar"]
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [raw], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+        self.assertEqual(result.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+        self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
+
+    def test_auth_status_precedes_private_or_restricted_error_text(self) -> None:
+        for status in (401, 403):
+            class Client:
+                def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                    return {"error": "private or restricted"}, HttpResponse(status, {}, b""), "request"
+
+            with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+                cfg = config(Path(directory))
+                result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+            self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps), status)
+            self.assertFalse(any(gap.reason == "unavailable" for gap in result.gaps), status)
 
     def test_refresh_error_with_deleted_url_slug_remains_report_only(self) -> None:
         requested = "https://www.reddit.com/r/smallbusiness/comments/p/deleted-project/"

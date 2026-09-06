@@ -1165,9 +1165,13 @@ class BrightDataProvider(HttpProviderBase):
 
     @classmethod
     def _unavailable_like(cls, error: Any, status: int | None = None) -> bool:
+        if status in {401, 403}:
+            return False
         if status == 404:
             return True
         if isinstance(error, Mapping):
+            if any(str(error.get(key)).strip() in {"401", "403"} for key in ("status", "status_code", "code", "error_code")):
+                return False
             text = " ".join(
                 cls._error_text(error[key])
                 for key in ("error", "message", "reason", "code", "status", "status_code", "error_code")
@@ -1335,6 +1339,7 @@ class BrightDataProvider(HttpProviderBase):
         malformed_record_count = 0
         returned_count = 0
         identity_keys = ("id", "post_id", "fullname", "name")
+        downstream_provider_error_count = 0
         response_status = response.status if response else error.status if error else None
         if error is not None:
             shared_error = error.provider_payload if error.provider_payload is not None else str(error)
@@ -1381,7 +1386,6 @@ class BrightDataProvider(HttpProviderBase):
             and not any(self._error_matches(item, target_url) for target_url in batch_urls)
         ]
         provider_error_count = len(errors) + (1 if error is not None else 0) + (1 if malformed_shape is not None else 0) + malformed_record_count
-        self._update_accounting(request_records, returned_records=returned_count, provider_error_count=provider_error_count)
         for key, raw_items in by_subreddit.items():
             subreddit = next(item for item in batch if self._subreddit_key(item) == key)
             target_url = f"https://www.reddit.com/r/{subreddit}/"
@@ -1394,6 +1398,7 @@ class BrightDataProvider(HttpProviderBase):
                 include_comments=False,
                 detect_deletion_state=False,
             )
+            downstream_provider_error_count += sum(gap.reason == "provider_error" for gap in parse_gaps)
             if config.comments_mode in {"bounded", "full"}:
                 parse_gaps.extend(self._comments_unsupported_gap(post, config.comments_mode) for post in posts)
             gaps = parse_gaps
@@ -1454,6 +1459,12 @@ class BrightDataProvider(HttpProviderBase):
                 metadata,
                 request_records if first else [],
             )
+        provider_error_count += downstream_provider_error_count
+        self._update_accounting(request_records, returned_records=returned_count, provider_error_count=provider_error_count)
+        for item in batch:
+            page = self._discovery_pages[self._subreddit_key(item)]
+            page.metadata["provider_error_count"] = provider_error_count
+            page.metadata["accounting"]["provider_error_count"] = provider_error_count
 
     def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
         if cursor is not None:
@@ -1515,6 +1526,7 @@ class BrightDataProvider(HttpProviderBase):
         observation_requests: dict[str, RequestRecord] = {}
         malformed_item_count = 0
         malformed_response_count = 0
+        downstream_provider_error_count = 0
         pending: list[tuple[PostSnapshot, str]] = []
         for post in posts:
             url = self._requested_post_url(post)
@@ -1593,7 +1605,8 @@ class BrightDataProvider(HttpProviderBase):
                 for item in raw_items
                 if isinstance(item, Mapping) and "error" in item and not any(key in item for key in identity_keys)
             ]
-            self._update_accounting(request_records, returned_records=len(output_records), provider_error_count=len(provider_errors) + len(malformed_items))
+            batch_provider_error_count = len(provider_errors) + len(malformed_items)
+            batch_downstream_provider_error_count = 0
             requested_urls = [requested_url for _, requested_url in batch]
             unmatched_provider_errors = [
                 item
@@ -1606,10 +1619,12 @@ class BrightDataProvider(HttpProviderBase):
             for raw in output_records:
                 matches = [post for post, _ in batch if self._post_record_matches(raw, post)]
                 if len(matches) != 1:
+                    batch_downstream_provider_error_count += 1
                     gaps.append(Gap("post", "provider_error", detail="provider record could not be attributed to exactly one requested post"))
                     continue
                 target = matches[0]
                 if target.post_id in returned_by_post:
+                    batch_downstream_provider_error_count += 1
                     gaps.append(Gap("post", "provider_error", entity_id=target.post_id, subreddit=target.subreddit, detail="provider returned duplicate post records"))
                     continue
                 returned_by_post[target.post_id] = raw
@@ -1630,9 +1645,11 @@ class BrightDataProvider(HttpProviderBase):
                         detect_deletion_state=False,
                     )
                 except (TypeError, ValueError) as exc:
+                    batch_downstream_provider_error_count += 1
                     gaps.append(_malformed_gap("post", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
                     continue
                 if refreshed.post_id != post.post_id:
+                    batch_downstream_provider_error_count += 1
                     gaps.append(_id_mismatch_gap("post", post.post_id, refreshed.post_id, post.subreddit))
                     continue
                 gaps.extend(_report_only_state_gaps(raw, entity_id=post.post_id, subreddit=post.subreddit))
@@ -1644,6 +1661,12 @@ class BrightDataProvider(HttpProviderBase):
                 all_posts.append(refreshed)
                 if batch_record is not None:
                     observation_requests[post.post_id] = batch_record
+            downstream_provider_error_count += batch_downstream_provider_error_count
+            self._update_accounting(
+                request_records,
+                returned_records=len(output_records),
+                provider_error_count=batch_provider_error_count + batch_downstream_provider_error_count,
+            )
         primary = next((record for record in records if record.operation == "refresh"), None)
         metadata = {
             "comments_mode": config.comments_mode,
@@ -1656,7 +1679,7 @@ class BrightDataProvider(HttpProviderBase):
             "malformed_record_count": malformed_item_count,
             "malformed_response_count": malformed_response_count,
             "provider_error_count": sum(int(record.metadata.get("provider_error_count", 0)) for record in records),
-            "request_failed": malformed_item_count > 0 or malformed_response_count > 0,
+            "request_failed": malformed_item_count > 0 or malformed_response_count > 0 or downstream_provider_error_count > 0,
         }
         return RefreshResult(
             all_posts,
