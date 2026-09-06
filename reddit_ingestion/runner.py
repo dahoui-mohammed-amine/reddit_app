@@ -79,6 +79,8 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
         raise ValueError("mode must be run, discover, or refresh")
     if provider.name != "fixture":
         check_live_access(provider, allow_paid=allow_paid)
+    if provider.name == "brightdata":
+        db.purge_raw_evidence(config.raw_evidence_retention_days)
     started = utc_now()
     run_id = db.start_run(provider.name, mode, config_dict(config), started)
     summary = RunSummary(run_id)

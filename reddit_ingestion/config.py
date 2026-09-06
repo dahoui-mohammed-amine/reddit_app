@@ -23,6 +23,7 @@ class Config:
     max_retries: int
     request_interval_seconds: float = 0.25
     refresh_expiry_days: int = 30
+    raw_evidence_retention_days: int = 30
 
 
 def _path(value: str | None, base: Path) -> Path | None:
@@ -69,4 +70,5 @@ def load_config(path: str | Path) -> Config:
         max_retries=max(0, int(provider.get("max_retries", 3))),
         request_interval_seconds=max(0.0, float(provider.get("min_request_interval_seconds", 0.25))),
         refresh_expiry_days=max(1, int(ingestion.get("refresh_expiry_days", 30))),
+        raw_evidence_retention_days=max(1, int(provider.get("raw_evidence_retention_days", 30))),
     )

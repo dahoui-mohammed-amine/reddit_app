@@ -9,7 +9,7 @@ from unittest import mock
 
 from reddit_ingestion.config import Config
 from reddit_ingestion.db import Database
-from reddit_ingestion.models import PostSnapshot
+from reddit_ingestion.models import PageResult, PostSnapshot
 from reddit_ingestion.providers import BrightDataProvider, HttpResponse, JsonClient
 from reddit_ingestion.runner import run_once
 
@@ -137,7 +137,7 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(result.request_records[0].metadata["response_shape"], "array")
 
     def test_sparse_records_are_valid_but_deleted_like_partial_errors_are_unavailable(self) -> None:
-        sparse = {"post_id": "sparse", "community_url": "https://www.reddit.com/r/smallbusiness/", "num_comments": 0}
+        sparse = {"post_id": "sparse", "url": "https://www.reddit.com/r/smallbusiness/comments/sparse/title/", "num_comments": 0}
         deleted_error = {"url": "https://www.reddit.com/r/freelance/", "error": "deleted post"}
 
         class Client:
@@ -162,7 +162,7 @@ class BrightDataTests(unittest.TestCase):
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
                 return self.payload, HttpResponse(200, {}, b""), "request"
 
-        for payload in ({"data": [post_record("smallbusiness")]}, {"records": [post_record("smallbusiness")]}, {"unexpected": True}):
+        for payload in ({"data": [post_record("smallbusiness")]}, {"records": [post_record("smallbusiness")]}, {"errors": []}, {"unexpected": True}):
             with self.subTest(payload=payload):
                 Client.payload = payload
                 with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
@@ -201,6 +201,74 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(result.posts[0].comments, [])
         self.assertTrue(any(gap.reason == "unsupported" and gap.entity_type == "comment" for gap in result.gaps))
         self.assertNotEqual(result.posts[0].observed_at, "")
+
+    def test_refresh_rejects_contradictory_post_url_identity(self) -> None:
+        requested = "https://www.reddit.com/r/smallbusiness/comments/p/title/"
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [{"post_id": "p", "url": "https://www.reddit.com/r/smallbusiness/comments/q/other-title/"}], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts([PostSnapshot("p", "t3_p", "smallbusiness", permalink=requested)], cfg)
+
+        self.assertEqual(result.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+
+    def test_deleted_refresh_error_creates_tombstone_and_purges_raw_evidence(self) -> None:
+        raw_error = {"url": "https://www.reddit.com/r/smallbusiness/comments/p/title/", "error": "deleted post"}
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [raw_error], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            root = Path(directory)
+            cfg = config(root)
+            db = Database(cfg.database_path)
+            existing = PostSnapshot("p", "t3_p", "smallbusiness", title="title", body="body", author="author", permalink="/r/smallbusiness/comments/p/title/", observed_at=OBSERVED)
+            run_id = db.start_run("brightdata", "discover", {}, OBSERVED)
+            with db.transaction():
+                db.save_page(run_id, "brightdata", "smallbusiness", PageResult([existing], None, None, OBSERVED, "fixture://p", 200, "request"))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts([existing], cfg)
+            self.assertTrue(result.posts[0].deleted)
+            with db.transaction():
+                db.save_refresh(run_id, "brightdata", result)
+            row = db.connection.execute("SELECT title, body, author, deleted FROM posts WHERE post_id='p'").fetchone()
+            self.assertEqual(tuple(row), (None, None, None, 1))
+            self.assertGreaterEqual(db.purge_deleted_content(), 0)
+            request_metadata = [json.loads(row[0]) for row in db.connection.execute("SELECT metadata_json FROM requests WHERE provider='brightdata'")]
+            observation_metadata = [json.loads(row[0]) for row in db.connection.execute("SELECT metadata_json FROM post_observations WHERE provider='brightdata'")]
+            self.assertTrue(request_metadata)
+            self.assertTrue(observation_metadata)
+            self.assertTrue(all("raw_payload" not in metadata for metadata in request_metadata))
+            self.assertTrue(all("raw_payload" not in metadata for metadata in observation_metadata))
+            db.close()
+
+    def test_raw_brightdata_evidence_expires_from_requests_and_observations(self) -> None:
+        raw = post_record("smallbusiness")
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [raw], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            root = Path(directory)
+            cfg = config(root)
+            db = Database(cfg.database_path)
+            run_once(db, BrightDataProvider(cfg, client=Client()), cfg, "discover", allow_paid=True)
+            db.connection.execute("UPDATE requests SET requested_at = '2000-01-01 00:00:00'")
+            db.connection.execute("UPDATE post_observations SET observed_at = '2000-01-01T00:00:00Z'")
+            db.connection.commit()
+            self.assertEqual(db.purge_raw_evidence(1), 2)
+            request_metadata = json.loads(db.connection.execute("SELECT metadata_json FROM requests WHERE provider='brightdata'").fetchone()[0])
+            observation_metadata = json.loads(db.connection.execute("SELECT metadata_json FROM post_observations WHERE provider='brightdata'").fetchone()[0])
+            self.assertNotIn("raw_payload", request_metadata)
+            self.assertNotIn("raw_payload", observation_metadata)
+            self.assertTrue(request_metadata["raw_evidence_purged"])
+            self.assertTrue(observation_metadata["raw_evidence_purged"])
+            db.close()
 
     def test_202_snapshot_is_a_safe_unsupported_result_without_followup(self) -> None:
         calls: list[int] = []

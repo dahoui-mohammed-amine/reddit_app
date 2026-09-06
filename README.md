@@ -29,6 +29,7 @@ Copy `config.example.toml` and edit the explicit `[ingestion]`, `[comments]`, an
 - `comments.mode` is `bounded` or `full`. Bounded mode records explicit gaps when depth/limit truncates comments. Full mode is opt-in; FetchLayer reports full expansion as unsupported.
 - `provider.min_request_interval_seconds` paces live requests before each attempt; retry backoff and provider retry-after values still apply.
 - `provider.name` is `fixture`, `redditapis`, `fetchlayer`, or `brightdata`; fixture remains the safe default.
+- `provider.raw_evidence_retention_days` bounds retained Bright Data raw request evidence; the purge command removes it when a post or comment is marked deleted or removed.
 
 ## Provider access and cost gate
 
@@ -54,7 +55,7 @@ No call occurs unless the selected provider's key exists and `--allow-paid` is s
 
 Bright Data uses the documented Reddit dataset IDs `gd_lvz8ah06191smkebj4` (posts/discovery) and `gd_lvzdpsdlw09j6t702` (comments), with `POST /datasets/v3/scrape` and an `{"input": [...]}` body. Subreddit discovery batches up to 20 subreddit URLs with `sort_by = "new"`; it does not invent cursors or pagination. Discovery does not fan out to comments. Bright Data comments are unsupported because documented comment records expose no depth and `days_back` is not a count cap. Asynchronous `202` snapshots are reported as unsupported rather than polled.
 
-Bright Data request records retain the request body, raw JSON response/error, `fetched_at`, dataset ID, requested-input count, returned-record count, and provider-error count. These are request-versus-record observations only; undocumented billing/credit semantics are never estimated.
+Bright Data request records retain the request body, raw JSON response/error, `fetched_at`, dataset ID, requested-input count, returned-record count, and provider-error count during the configured evidence window. These are request-versus-record observations only; undocumented billing/credit semantics are never estimated.
 
 The RedditAPIs adapter uses the documented subreddit listing and up-to-100 `t3_` fullname batch refresh shape. The FetchLayer adapter uses subreddit-post and one-post-URL endpoints; its full comment expansion is unsupported and records an explicit unexpanded gap while still refreshing post metrics. Provider responses retain cache/status metadata where supplied. Score and comment-count changes are observations, not exact vote-arrival rates.
 
@@ -74,7 +75,7 @@ Deleted or removed content clears mutable text/author fields while retaining sta
 uv run reddit-ingest purge --config config.toml
 ```
 
-This is not an immutable raw Reddit archive. Confirm applicable Reddit/provider retention and deletion obligations before storing live content.
+Bright Data raw request evidence is retained only for the configured bounded period and is purged with deleted/removed content. This is not an immutable raw Reddit archive. Confirm applicable Reddit/provider retention and deletion obligations before storing live content.
 
 ## One-shot scheduling
 

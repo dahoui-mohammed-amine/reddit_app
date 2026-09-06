@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -1002,6 +1002,19 @@ class BrightDataProvider(HttpProviderBase):
         return value if value.startswith(("http://", "https://")) else f"https://www.reddit.com{value if value.startswith('/') else '/' + value}"
 
     @classmethod
+    def _post_url_id(cls, value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        path = urlparse(cls._absolute_reddit_url(value.strip())).path.strip("/").split("/")
+        try:
+            comments_index = next(index for index, item in enumerate(path) if item.casefold() == "comments")
+        except StopIteration:
+            return None
+        if comments_index + 1 >= len(path) or not path[comments_index + 1]:
+            return None
+        return path[comments_index + 1].removeprefix("t3_").casefold()
+
+    @classmethod
     def _subreddit_from_value(cls, value: Any) -> str | None:
         if not isinstance(value, str) or not value.strip():
             return None
@@ -1018,7 +1031,7 @@ class BrightDataProvider(HttpProviderBase):
 
     @classmethod
     def _record_subreddit(cls, raw: Mapping[str, Any]) -> str | None:
-        for key in ("community_url", "subreddit_url", "community_name", "subreddit", "community"):
+        for key in ("community_url", "subreddit_url", "url", "post_url", "permalink", "community_name", "subreddit", "community"):
             subreddit = cls._subreddit_from_value(raw.get(key))
             if subreddit:
                 return subreddit
@@ -1031,10 +1044,6 @@ class BrightDataProvider(HttpProviderBase):
         if isinstance(payload, dict):
             if payload.get("snapshot_id"):
                 return "snapshot"
-            if "data" in payload or "records" in payload:
-                return "object"
-            if "errors" in payload:
-                return "object.errors"
             return "object"
         return type(payload).__name__
 
@@ -1044,15 +1053,9 @@ class BrightDataProvider(HttpProviderBase):
             return payload, [], "array"
         if not isinstance(payload, dict):
             return None, [], cls._response_shape(payload)
-        raw_errors = payload.get("errors", [])
-        errors = raw_errors if isinstance(raw_errors, list) else [raw_errors] if raw_errors not in (None, "") else []
         if payload.get("snapshot_id"):
-            return None, errors, "snapshot"
-        if "data" in payload or "records" in payload:
-            return None, errors, "object"
-        if "errors" in payload:
-            return [], errors, "object.errors"
-        return None, errors, "object"
+            return None, [], "snapshot"
+        return None, [], "object"
 
     @staticmethod
     def _error_text(error: Any) -> str:
@@ -1360,14 +1363,34 @@ class BrightDataProvider(HttpProviderBase):
         return BrightDataProvider._absolute_reddit_url(value) if value else None
 
     def _post_record_matches(self, raw: Mapping[str, Any], post: PostSnapshot) -> bool:
-        requested_url = self._canonical_url(self._requested_post_url(post))
-        for key in ("url", "post_url", "permalink"):
-            if self._canonical_url(raw.get(key)) == requested_url and requested_url is not None:
-                return True
+        requested_url = self._requested_post_url(post)
+        requested_url_id = self._post_url_id(requested_url)
+        raw_url_values = [raw.get(key) for key in ("url", "post_url", "permalink") if raw.get(key)]
+        raw_url_ids = {url_id for value in raw_url_values if (url_id := self._post_url_id(value)) is not None}
         try:
-            return post_id(raw) == post.post_id
+            raw_post_id = post_id(raw).casefold()
         except (TypeError, ValueError):
+            raw_post_id = None
+        if len(raw_url_ids) > 1:
             return False
+        if raw_url_ids:
+            raw_url_id = next(iter(raw_url_ids))
+            return (requested_url_id is None or raw_url_id == requested_url_id) and (raw_post_id is None or raw_post_id == raw_url_id)
+        requested_canonical = self._canonical_url(requested_url)
+        if requested_canonical is not None and any(self._canonical_url(value) == requested_canonical for value in raw_url_values):
+            return raw_post_id is None or raw_post_id == post.post_id.casefold()
+        return raw_post_id == post.post_id.casefold()
+
+    @classmethod
+    def _tombstone_for_error(cls, post: PostSnapshot, error: Any, target_url: str, observed_at: str) -> PostSnapshot | None:
+        if not isinstance(error, Mapping) or cls._error_matches(error, None) or not cls._error_matches(error, target_url):
+            return None
+        text = cls._error_text(error).casefold()
+        if "deleted" in text:
+            return replace(post, deleted=True, deletion_known=True, observed_at=observed_at)
+        if "removed" in text:
+            return replace(post, removed=True, removal_known=True, observed_at=observed_at)
+        return None
 
     @staticmethod
     def _comments_unsupported_gap(post: PostSnapshot, mode: str) -> Gap:
@@ -1441,6 +1464,11 @@ class BrightDataProvider(HttpProviderBase):
                 if raw is None:
                     if target_errors:
                         gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=item) for item in target_errors)
+                        tombstone = next((self._tombstone_for_error(post, item, requested_url, fetched_at) for item in target_errors), None)
+                        if tombstone is not None:
+                            all_posts.append(tombstone)
+                            if batch_record is not None:
+                                observation_requests[post.post_id] = batch_record
                     else:
                         gaps.append(Gap("post", "not_returned", entity_id=post.post_id, subreddit=post.subreddit, detail="Bright Data returned no record for this requested URL"))
                     continue
