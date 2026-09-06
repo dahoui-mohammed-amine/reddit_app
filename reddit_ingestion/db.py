@@ -207,15 +207,17 @@ class Database:
     def save_page(self, run_id: str, provider: str, subreddit: str, page: PageResult) -> tuple[int, int]:
         for post in page.posts:
             self._save_post(post, provider)
-            self._save_observation(post, provider, page, result_metadata=self._observation_metadata(page, post.post_id))
-            if post.deleted or post.removed:
-                page.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
+            comments_incomplete = False
             for comment in post.comments:
                 if not self._save_comment(comment, post.post_id, provider):
+                    comments_incomplete = True
                     page.gaps.append(Gap("comment", "provider_error", entity_id=comment.comment_id, subreddit=post.subreddit, detail="comment belongs to another post"))
                     continue
                 if comment.deleted or comment.removed:
                     page.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
+            self._save_observation(post, provider, page, result_metadata=self._observation_metadata(page, post.post_id, comments_incomplete=comments_incomplete))
+            if post.deleted or post.removed:
+                page.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
         listing_status = page.metadata.get("listing_status")
         if listing_status in {"truncated", "unknown"}:
             page.gaps.append(Gap("listing", "truncated", subreddit=subreddit, detail=f"listing_status={listing_status}"))
@@ -235,21 +237,23 @@ class Database:
         self._defer_omitted_full_comments(result)
         for post in result.posts:
             self._save_post(post, provider)
+            comments_incomplete = False
+            for comment in post.comments:
+                if not self._save_comment(comment, post.post_id, provider):
+                    comments_incomplete = True
+                    result.gaps.append(Gap("comment", "provider_error", entity_id=comment.comment_id, subreddit=post.subreddit, detail="comment belongs to another post"))
+                    continue
+                if comment.deleted or comment.removed:
+                    result.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
             self._save_observation(
                 post,
                 provider,
                 result,
                 result.observation_requests.get(post.post_id),
-                self._observation_metadata(result, post.post_id),
+                self._observation_metadata(result, post.post_id, comments_incomplete=comments_incomplete),
             )
             if post.deleted or post.removed:
                 result.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
-            for comment in post.comments:
-                if not self._save_comment(comment, post.post_id, provider):
-                    result.gaps.append(Gap("comment", "provider_error", entity_id=comment.comment_id, subreddit=post.subreddit, detail="comment belongs to another post"))
-                    continue
-                if comment.deleted or comment.removed:
-                    result.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
         for gap in result.gaps:
             self._save_gap(run_id, provider, gap, result.observed_at)
         self._save_request_records(run_id, provider, result.request_records, "refresh", result.request_id, result.response_status, result.cache_status, result.cache_observed_at, result.metadata)
@@ -304,10 +308,16 @@ class Database:
             (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, post.refresh_until, provider, post.observed_at),
         )
 
-    def _observation_metadata(self, result: PageResult | RefreshResult, post_id: str) -> dict[str, Any]:
+    def _observation_metadata(
+        self,
+        result: PageResult | RefreshResult,
+        post_id: str,
+        *,
+        comments_incomplete: bool = False,
+    ) -> dict[str, Any]:
         metadata = dict(result.metadata)
         if "comments_expanded" in metadata:
-            metadata["comments_expanded"] = not any(
+            metadata["comments_expanded"] = not comments_incomplete and not any(
                 gap.entity_type == "comment" and (gap.entity_id is None or gap.entity_id == post_id)
                 for gap in result.gaps
             )

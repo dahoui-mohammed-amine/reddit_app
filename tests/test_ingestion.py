@@ -613,9 +613,11 @@ class IngestionTests(unittest.TestCase):
                 db.save_page(run_id, "fixture", "freelance", PageResult([first], None, None, observed, "fixture://p1", 200, "request"))
             second = PostSnapshot("p2", "t3_p2", "freelance", observed_at=observed, comments=[CommentSnapshot("c", "t1_c", "p2", observed_at=observed)])
             with db.transaction():
-                db.save_page(run_id, "fixture", "freelance", PageResult([second], None, None, observed, "fixture://p2", 200, "request"))
+                db.save_page(run_id, "fixture", "freelance", PageResult([second], None, None, observed, "fixture://p2", 200, "request", metadata={"comments_expanded": True}))
             self.assertEqual(db.connection.execute("SELECT post_id FROM comments WHERE comment_id='c'").fetchone()[0], "p1")
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE entity_id='c' AND reason='provider_error'").fetchone()[0], 1)
+            metadata = db.connection.execute("SELECT metadata_json FROM post_observations WHERE post_id='p2'").fetchone()[0]
+            self.assertFalse(json.loads(metadata)["comments_expanded"])
             db.close()
 
     def test_partial_refresh_observation_preserves_source_created_at(self) -> None:
