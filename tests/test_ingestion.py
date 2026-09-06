@@ -66,6 +66,9 @@ class IngestionTests(unittest.TestCase):
         fallback = parse_post({"id": "fallback", "created_at_iso": "", "created_utc": "2026-09-01T00:00:00Z", "num_comments": "", "commentCount": 2})
         self.assertEqual(fallback.created_at, "2026-09-01T00:00:00Z")
         self.assertEqual(fallback.num_comments, 2)
+        invalid_fallback = parse_post({"id": "invalid-fallback", "created_at_iso": "not-a-date", "created_utc": "2026-09-01T00:00:00Z", "num_comments": "oops", "commentCount": 2})
+        self.assertEqual(invalid_fallback.created_at, "2026-09-01T00:00:00Z")
+        self.assertEqual(invalid_fallback.num_comments, 2)
 
     def test_normalization_rejects_empty_and_conflicting_ids(self) -> None:
         with self.assertRaises(ValueError):
@@ -83,6 +86,10 @@ class IngestionTests(unittest.TestCase):
             parse_comment({"id": "c", "parent_id": "c2"}, post=post, observed_at=post.observed_at)
         with self.assertRaises(ValueError):
             parse_post({"id": "p", "title": {"bad": 1}})
+        with self.assertRaises(ValueError):
+            parse_post({"id": "t1_c"})
+        with self.assertRaises(ValueError):
+            parse_comment({"id": "t3_p"}, post=post, observed_at=post.observed_at)
 
     def test_comment_links_must_match_requested_post(self) -> None:
         post = parse_post({"id": "p1"}, observed_at="2026-09-05T00:00:00Z")
@@ -631,7 +638,7 @@ class IngestionTests(unittest.TestCase):
             row = db.connection.execute("SELECT deleted, score FROM posts WHERE post_id='p'").fetchone()
             self.assertEqual(tuple(row), (1, 5))
             self.assertEqual(db.purge_deleted_content(), 1)
-            unknown = parse_post({"id": "p", "deleted": None, "score": 5, "num_comments": 0}, default_subreddit="freelance", observed_at=observed)
+            unknown = parse_post({"id": "p", "deleted": "", "score": 5, "num_comments": 0}, default_subreddit="freelance", observed_at=observed)
             with db.transaction():
                 db.save_refresh(run_id, "fixture", RefreshResult([unknown], observed, "refresh", 200))
             self.assertEqual(db.connection.execute("SELECT deleted FROM posts WHERE post_id='p'").fetchone()[0], 1)
@@ -640,6 +647,36 @@ class IngestionTests(unittest.TestCase):
                 db.save_refresh(run_id, "fixture", RefreshResult([cleared], observed, "refresh", 200))
             self.assertEqual(db.connection.execute("SELECT deleted, score FROM posts WHERE post_id='p'").fetchone()[0:2], (0, 6))
             self.assertEqual(db.purge_deleted_content(), 0)
+            db.close()
+
+    def test_invalid_source_timestamp_is_replaced_by_valid_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            initial = PostSnapshot("p", "t3_p", "freelance", created_at="not-a-date", observed_at=observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([initial], None, None, observed, "fixture://p", 200, "fixture"))
+            refreshed = PostSnapshot("p", "t3_p", "freelance", created_at="2020-01-01T00:00:00Z", observed_at=observed)
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", RefreshResult([refreshed], observed, "refresh", 200))
+            self.assertEqual(db.connection.execute("SELECT created_at FROM posts WHERE post_id='p'").fetchone()[0], "2020-01-01T00:00:00Z")
+            self.assertEqual(db.connection.execute("SELECT source_created_at FROM post_observations WHERE post_id='p' ORDER BY observation_id DESC LIMIT 1").fetchone()[0], "2020-01-01T00:00:00Z")
+            db.close()
+
+    def test_negative_comment_count_is_stored_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            post = PostSnapshot("p", "t3_p", "freelance", num_comments=-1, observed_at=observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([post], None, None, observed, "fixture://p", 200, "fixture", metadata={"comments_expanded": True}))
+            self.assertIsNone(db.connection.execute("SELECT num_comments FROM posts WHERE post_id='p'").fetchone()[0])
+            self.assertIsNone(db.connection.execute("SELECT num_comments FROM post_observations WHERE post_id='p'").fetchone()[0])
+            self.assertEqual(db.connection.execute("SELECT reason FROM gaps WHERE entity_id='p'").fetchone()[0], "unexpanded")
             db.close()
 
     def test_partial_snapshot_preserves_archived_and_locked_state(self) -> None:
@@ -651,7 +688,7 @@ class IngestionTests(unittest.TestCase):
             initial = parse_post({"id": "p", "archived": True, "locked": True}, default_subreddit="freelance", observed_at=observed)
             with db.transaction():
                 db.save_page(run_id, "fixture", "freelance", PageResult([initial], None, None, observed, "fixture://p", 200, "fixture"))
-            partial = parse_post({"id": "p", "score": 5}, default_subreddit="freelance", observed_at=observed)
+            partial = parse_post({"id": "p", "score": 5, "archived": "", "locked": ""}, default_subreddit="freelance", observed_at=observed)
             with db.transaction():
                 db.save_refresh(run_id, "fixture", RefreshResult([partial], observed, "refresh", 200))
             row = db.connection.execute("SELECT archived, locked, score FROM posts WHERE post_id='p'").fetchone()
@@ -1183,6 +1220,34 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM requests").fetchone()[0], 3)
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='provider_error'").fetchone()[0], 3)
             self.assertIsNone(db.checkpoint("freelance"))
+            db.close()
+
+    def test_discovery_rejects_provider_subreddit_mismatch(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                return {"posts": [{"id": "p", "subreddit": "smallbusiness"}]}, HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root, provider="redditapis"), subreddits=("freelance",))
+            run_once(db, RedditApisProvider(cfg, client=Client()), cfg, "discover", allow_paid=True)
+            self.assertEqual(db.counts()["posts"], 0)
+            self.assertIsNone(db.checkpoint("freelance"))
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE entity_type='post'").fetchone()[0], 1)
+            db.close()
+
+    def test_malformed_cache_timestamp_is_not_persisted(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                return {"posts": [], "cache_status": "cached", "cached_at": {"at": "2026-09-05T00:00:00Z"}}, HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root, provider="redditapis"), subreddits=("freelance",))
+            run_once(db, RedditApisProvider(cfg, client=Client()), cfg, "discover", allow_paid=True)
+            self.assertIsNone(db.connection.execute("SELECT cache_observed_at FROM requests").fetchone()[0])
             db.close()
 
     def test_malformed_discovery_page_stops_later_checkpoint(self) -> None:

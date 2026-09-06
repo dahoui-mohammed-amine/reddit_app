@@ -159,20 +159,31 @@ def _env_key(name: str) -> str | None:
 
 
 def _cache_info(payload: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    cache_observed_at = next(
+        (
+            str(payload[key])
+            for key in ("cached_at", "cachedAt")
+            if key in payload
+            and payload[key] not in (None, "")
+            and isinstance(payload[key], (str, int, float))
+            and not isinstance(payload[key], bool)
+        ),
+        None,
+    )
     if "cache_status" in payload:
         status = str(payload["cache_status"]).lower()
-        return (status if status in {"cached", "live", "unknown"} else "unknown", payload.get("cached_at") or payload.get("cachedAt"))
+        return (status if status in {"cached", "live", "unknown"} else "unknown", cache_observed_at)
     if "cacheStatus" in payload:
         status = str(payload["cacheStatus"]).lower()
-        return (status if status in {"cached", "live", "unknown"} else "unknown", payload.get("cached_at") or payload.get("cachedAt"))
+        return (status if status in {"cached", "live", "unknown"} else "unknown", cache_observed_at)
     if "cached" not in payload:
-        return "unknown", payload.get("cached_at") or payload.get("cachedAt")
+        return "unknown", cache_observed_at
     cached = payload.get("cached")
     if isinstance(cached, bool):
-        return ("cached" if cached else "live"), payload.get("cached_at") or payload.get("cachedAt")
+        return ("cached" if cached else "live"), cache_observed_at
     if isinstance(cached, str) and cached.lower() in {"true", "false"}:
-        return ("cached" if cached.lower() == "true" else "live"), payload.get("cached_at") or payload.get("cachedAt")
-    return "unknown", payload.get("cached_at") or payload.get("cachedAt")
+        return ("cached" if cached.lower() == "true" else "live"), cache_observed_at
+    return "unknown", cache_observed_at
 
 
 def _request_record(
@@ -288,6 +299,18 @@ def _parse_post_items(
             continue
         if post.post_id in seen_post_ids:
             continue
+        if default_subreddit and post.subreddit and post.subreddit.casefold() != default_subreddit.casefold():
+            gaps.append(
+                _malformed_gap(
+                    "post",
+                    entity_id=post.post_id,
+                    subreddit=default_subreddit,
+                    detail=f"provider returned subreddit {post.subreddit!r} for requested {default_subreddit!r}",
+                )
+            )
+            continue
+        if default_subreddit:
+            post.subreddit = default_subreddit
         seen_post_ids.add(post.post_id)
         posts.append(post)
         gaps.extend(

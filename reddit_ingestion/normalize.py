@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,11 +11,37 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _value(raw: Mapping[str, Any], *keys: str) -> Any:
+def _value(raw: Mapping[str, Any], *keys: str, validator: Callable[[Any], bool] | None = None) -> Any:
+    fallback: Any = None
     for key in keys:
-        if key in raw and raw[key] is not None and raw[key] != "":
+        if key not in raw or raw[key] is None or raw[key] == "":
+            continue
+        if fallback is None:
+            fallback = raw[key]
+        if validator is None or validator(raw[key]):
             return raw[key]
-    return None
+    return fallback
+
+
+def _valid_source_time(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return False
+    try:
+        datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        try:
+            datetime.fromtimestamp(float(value), tz=timezone.utc)
+            return True
+        except (OSError, OverflowError, ValueError):
+            return False
+
+
+def _valid_nonnegative_int(value: Any) -> bool:
+    try:
+        return int(value) >= 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _text(value: Any) -> str | None:
@@ -70,7 +96,7 @@ def _removed(raw: Mapping[str, Any]) -> bool:
 
 
 def _state_known(raw: Mapping[str, Any], marker_keys: tuple[str, ...], content_keys: tuple[str, ...], values: set[str]) -> bool:
-    return any(key in raw and raw[key] is not None for key in marker_keys) or any(raw[key] in values for key in content_keys if key in raw)
+    return any(key in raw and raw[key] is not None and raw[key] != "" for key in marker_keys) or any(raw[key] in values for key in content_keys if key in raw)
 
 
 def _normalized_aliases(raw: Mapping[str, Any], keys: tuple[str, ...], prefix: str, label: str, *, require_prefix: bool = False) -> str | None:
@@ -88,6 +114,9 @@ def _normalized_aliases(raw: Mapping[str, Any], keys: tuple[str, ...], prefix: s
         normalized = value.removeprefix(prefix)
         if not normalized:
             raise ValueError(f"{label} is empty")
+        sibling_prefix = "t1_" if prefix == "t3_" else "t3_"
+        if normalized.startswith(sibling_prefix):
+            raise ValueError(f"{label} uses the wrong resource prefix")
         values.append(normalized)
     if values and any(value != values[0] for value in values[1:]):
         raise ValueError(f"{label} aliases disagree")
@@ -159,7 +188,7 @@ def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed
         author=_text(_value(raw, "author", "author_username")),
         body=_text(_value(raw, "body", "bodyText", "text")),
         permalink=_relative_permalink(_text(_value(raw, "permalink", "url"))),
-        created_at=_text(_value(raw, "created_at_iso", "createdAt", "created_utc", "created")),
+        created_at=_text(_value(raw, "created_at_iso", "createdAt", "created_utc", "created", validator=_valid_source_time)),
         score=_int(_value(raw, "score", "points")),
         ups=_int(_value(raw, "ups", "upvotes")),
         deleted=_deleted(raw),
@@ -191,11 +220,11 @@ def parse_post(
         author=_text(_value(raw, "author", "author_username")),
         permalink=_relative_permalink(_text(_value(raw, "permalink"))),
         url=_text(_value(raw, "url", "post_url")),
-        created_at=_text(_value(raw, "created_at_iso", "createdAt", "created_utc", "created")),
+        created_at=_text(_value(raw, "created_at_iso", "createdAt", "created_utc", "created", validator=_valid_source_time)),
         score=_int(_value(raw, "score")),
         ups=_int(_value(raw, "ups", "upvotes")),
         upvote_ratio=_float(_value(raw, "upvote_ratio", "upvoteRatio")),
-        num_comments=_int(_value(raw, "num_comments", "commentCount", "comment_count")),
+        num_comments=_int(_value(raw, "num_comments", "commentCount", "comment_count", validator=_valid_nonnegative_int)),
         archived=_bool(_value(raw, "archived")),
         locked=_bool(_value(raw, "locked")),
         deleted=_deleted(raw),
@@ -203,8 +232,8 @@ def parse_post(
         observed_at=observed,
         deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "selftext", "text"), {"[deleted]", "deleted"}),
         removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "selftext"), {"[removed]", "removed"}),
-        archived_known=raw.get("archived") is not None,
-        locked_known=raw.get("locked") is not None,
+        archived_known=raw.get("archived") not in (None, ""),
+        locked_known=raw.get("locked") not in (None, ""),
     )
     if include_comments:
         comments = _value(raw, "comments")

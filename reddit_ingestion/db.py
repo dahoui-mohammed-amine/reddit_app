@@ -203,6 +203,7 @@ class Database:
 
     def save_page(self, run_id: str, provider: str, subreddit: str, page: PageResult) -> tuple[int, int]:
         for post in page.posts:
+            self._ensure_invalid_comment_count_gap(page, post)
             self._save_post(post, provider)
             comments_incomplete = False
             for comment in post.comments:
@@ -237,6 +238,7 @@ class Database:
     def save_refresh(self, run_id: str, provider: str, result: RefreshResult) -> tuple[int, int]:
         self._defer_omitted_full_comments(result)
         for post in result.posts:
+            self._ensure_invalid_comment_count_gap(result, post)
             self._save_post(post, provider)
             comments_incomplete = False
             for comment in post.comments:
@@ -305,11 +307,31 @@ class Database:
         if not post.removal_known:
             clear_post_content.append("posts.removed")
         clear_post_content = " OR ".join(clear_post_content)
+        valid_incoming_created_at = "(datetime(excluded.created_at) IS NOT NULL OR datetime(excluded.created_at, 'unixepoch') IS NOT NULL)"
+        invalid_stored_created_at = "(posts.created_at IS NOT NULL AND datetime(posts.created_at) IS NULL AND datetime(posts.created_at, 'unixepoch') IS NULL)"
+        created_at_update = f"created_at=CASE WHEN {invalid_stored_created_at} AND {valid_incoming_created_at} THEN excluded.created_at ELSE COALESCE(posts.created_at, excluded.created_at) END"
+        refresh_until_update = f"refresh_until=CASE WHEN (posts.created_at IS NULL OR {invalid_stored_created_at}) AND {valid_incoming_created_at} THEN COALESCE(excluded.refresh_until, posts.refresh_until) ELSE COALESCE(posts.refresh_until, excluded.refresh_until) END"
+        stored_num_comments = None if post.num_comments is not None and post.num_comments < 0 else post.num_comments
         self.connection.execute(
             f"""INSERT INTO posts(post_id, fullname, subreddit, title, body, author, permalink, url, created_at, score, ups, upvote_ratio, num_comments, archived, locked, deleted, removed, observed_at, refresh_until, provider, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(posts.created_at, excluded.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), {archived_update}, {locked_update}, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, refresh_until=CASE WHEN posts.created_at IS NULL AND excluded.created_at IS NOT NULL THEN excluded.refresh_until ELSE COALESCE(posts.refresh_until, excluded.refresh_until) END, provider=excluded.provider, updated_at=excluded.updated_at""",
-            (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, post.refresh_until, provider, post.observed_at),
+            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), {created_at_update}, score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), {archived_update}, {locked_update}, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, {refresh_until_update}, provider=excluded.provider, updated_at=excluded.updated_at""",
+            (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, stored_num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, post.refresh_until, provider, post.observed_at),
+        )
+
+    def _ensure_invalid_comment_count_gap(self, result: PageResult | RefreshResult, post: PostSnapshot) -> None:
+        if post.num_comments is None or post.num_comments >= 0:
+            return
+        if any(gap.entity_type == "comment" and gap.entity_id == post.post_id and gap.reason == "unexpanded" for gap in result.gaps):
+            return
+        result.gaps.append(
+            Gap(
+                "comment",
+                "unexpanded",
+                entity_id=post.post_id,
+                subreddit=post.subreddit,
+                detail=f"provider exposed invalid negative comment count {post.num_comments}",
+            )
         )
 
     def _observation_metadata(
@@ -343,6 +365,7 @@ class Database:
         metadata = {**request.metadata, **result_metadata} if request else result_metadata
         row = self.connection.execute("SELECT created_at FROM posts WHERE post_id = ?", (post.post_id,)).fetchone()
         source_created_at = row[0] if row else post.created_at
+        stored_num_comments = None if post.num_comments is not None and post.num_comments < 0 else post.num_comments
         if source_created_at is not None:
             self.connection.execute(
                 "UPDATE post_observations SET source_created_at = ? WHERE post_id = ? AND source_created_at IS NULL",
@@ -350,7 +373,7 @@ class Database:
             )
         self.connection.execute(
             "INSERT INTO post_observations(post_id, observed_at, provider, source_created_at, score, ups, upvote_ratio, num_comments, response_status, request_id, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (post.post_id, post.observed_at, provider, source_created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, response_status, request_id, cache_status, cache_observed_at, json.dumps(metadata, sort_keys=True)),
+            (post.post_id, post.observed_at, provider, source_created_at, post.score, post.ups, post.upvote_ratio, stored_num_comments, response_status, request_id, cache_status, cache_observed_at, json.dumps(metadata, sort_keys=True)),
         )
 
     def _save_comment(self, comment: CommentSnapshot, post_id: str, provider: str) -> bool:
