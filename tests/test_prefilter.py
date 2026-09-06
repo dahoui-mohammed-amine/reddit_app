@@ -67,7 +67,7 @@ class PrefilterTests(unittest.TestCase):
         spam = self.by_id["comment-spam"]
         self.assertEqual(spam.status, "rejected")
         self.assertEqual(spam.reason_codes, ("SPAM_MARKER",))
-        self.assertEqual(spam.metadata["matched_spam_markers"], ["buy now", "click here", "free money"])
+        self.assertEqual(spam.metadata["matched_spam_markers"], ("buy now", "click here", "free money"))
 
     def test_scope_is_rejected_but_unavailable_scope_is_incomplete(self) -> None:
         outside = self.by_id["post-outside"]
@@ -112,6 +112,28 @@ class PrefilterTests(unittest.TestCase):
         ).evaluate(self.records)
         self.assertEqual(rerun.to_dict(), self.result.to_dict())
         self.assertEqual(json.dumps(self.result.to_dict(), sort_keys=True), before)
+
+    def test_decision_metadata_is_immutable_and_serialized_as_a_copy(self) -> None:
+        record = RawRecord(
+            "comment",
+            {
+                "id": "comment-metadata-freeze",
+                "link_id": "post-parent",
+                "body": "Buy now for a guaranteed result.",
+            },
+            self.lineage,
+        )
+        decision = Prefilter().evaluate((record,)).decisions[0]
+        before = decision.to_dict()
+
+        with self.assertRaises(TypeError):
+            decision.metadata["raw_sha256"] = "changed"
+        with self.assertRaises(AttributeError):
+            decision.metadata["matched_spam_markers"].append("changed")
+        serialized = decision.to_dict()
+        serialized["metadata"]["raw_sha256"] = "changed"
+
+        self.assertEqual(decision.to_dict(), before)
 
     def test_conflicting_identifiers_and_subreddit_context_are_incomplete(self) -> None:
         conflict = RawRecord(
@@ -304,6 +326,33 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decisions[1].status, "rejected")
         self.assertEqual(decisions[1].reason_codes, ("SPAM_MARKER",))
 
+    def test_empty_content_aliases_fall_back_to_populated_fields(self) -> None:
+        post = RawRecord(
+            "post",
+            {
+                "id": "post-empty-fallback",
+                "title": "A post title",
+                "selftext": "",
+                "body": "Click here for a guaranteed result.",
+            },
+            self.lineage,
+        )
+        comment = RawRecord(
+            "comment",
+            {
+                "id": "comment-empty-fallback",
+                "link_id": "post-empty-fallback",
+                "body": "",
+                "bodyText": "Buy now for a guaranteed result.",
+            },
+            self.lineage,
+        )
+
+        decisions = Prefilter().evaluate((post, comment)).decisions
+
+        self.assertEqual(decisions[0].reason_codes, ("SPAM_MARKER",))
+        self.assertEqual(decisions[1].reason_codes, ("SPAM_MARKER",))
+
     def test_identifier_conflict_remains_incomplete_with_duplicate_evidence(self) -> None:
         first = RawRecord(
             "post",
@@ -328,6 +377,43 @@ class PrefilterTests(unittest.TestCase):
             ("IDENTIFIER_CONFLICT", "DUPLICATE_RECORD"),
         )
         self.assertEqual(decisions[1].metadata["duplicate_of"], decisions[0].evidence_id)
+
+    def test_empty_identifier_aliases_are_invalid_when_supplied(self) -> None:
+        post = RawRecord(
+            "post",
+            {
+                "id": "",
+                "fullname": "t3_post-empty-id",
+                "title": "Enough",
+            },
+            self.lineage,
+        )
+        link = RawRecord(
+            "comment",
+            {
+                "id": "comment-empty-link",
+                "post_id": "post-parent",
+                "link_id": "",
+                "body": "Enough",
+            },
+            self.lineage,
+        )
+        parent = RawRecord(
+            "comment",
+            {
+                "id": "comment-empty-parent",
+                "link_id": "post-parent",
+                "parent_id": "",
+                "body": "Enough",
+            },
+            self.lineage,
+        )
+
+        decisions = Prefilter().evaluate((post, link, parent)).decisions
+
+        self.assertEqual(decisions[0].reason_codes, ("INVALID_IDENTIFIER",))
+        self.assertEqual(decisions[1].reason_codes, ("INVALID_POST_RELATIONSHIP",))
+        self.assertEqual(decisions[2].reason_codes, ("INVALID_PARENT_ID",))
 
     def test_removed_compatibility_aliases_and_community_fallback_are_not_public(self) -> None:
         config = PrefilterConfig()
@@ -607,6 +693,31 @@ class PrefilterTests(unittest.TestCase):
 
         self.assertEqual(decision.status, "incomplete")
         self.assertEqual(decision.reason_codes, ("MALFORMED_RECORD",))
+
+    def test_adapter_preserves_malformed_record_type_values(self) -> None:
+        records = records_from_fixture(
+            {
+                "records": [
+                    {
+                        "record_type": 1,
+                        "raw": {"id": "post-boundary-type", "title": "Enough"},
+                    },
+                    {
+                        "record_type": "1",
+                        "raw": {"id": "post-boundary-type", "title": "Enough"},
+                    },
+                ]
+            },
+            default_lineage=self.lineage,
+        )
+
+        result = Prefilter().evaluate(records)
+
+        self.assertEqual(records[0].record_type, 1)
+        self.assertEqual(records[1].record_type, "1")
+        self.assertNotEqual(result.decisions[0].evidence_id, result.decisions[1].evidence_id)
+        self.assertEqual(result.decisions[0].reason_codes, ("MALFORMED_RECORD",))
+        self.assertEqual(result.decisions[1].reason_codes, ("MALFORMED_RECORD",))
 
     def test_sequence_configuration_options_reject_bare_strings(self) -> None:
         with self.assertRaises(ValueError):

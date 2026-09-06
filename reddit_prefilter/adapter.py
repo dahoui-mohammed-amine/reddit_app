@@ -75,7 +75,7 @@ def records_from_fixture(
             raise AdapterError("subreddit_context must be a string")
         records.append(
             RawRecord(
-                str(record_type) if record_type is not None else "unknown",
+                record_type,
                 raw,
                 _lineage(entry.get("lineage"), default_lineage),
                 subreddit_context,

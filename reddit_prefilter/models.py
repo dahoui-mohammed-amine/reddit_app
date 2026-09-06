@@ -138,6 +138,7 @@ class RawRecord:
     subreddit: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "record_type", _freeze(self.record_type))
         object.__setattr__(self, "raw", _freeze(self.raw))
         if self.lineage is not None and not isinstance(self.lineage, SourceLineage):
             object.__setattr__(self, "lineage", _freeze(self.lineage))
@@ -182,6 +183,9 @@ class Decision:
     lineage: SourceLineage | None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _freeze(self.metadata))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "evidence_id": self.evidence_id,
@@ -191,7 +195,7 @@ class Decision:
             "status": self.status,
             "reason_codes": list(self.reason_codes),
             "lineage": _lineage_to_dict(self.lineage),
-            "metadata": dict(self.metadata),
+            "metadata": _thaw(self.metadata),
         }
 
 

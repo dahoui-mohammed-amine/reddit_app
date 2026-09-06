@@ -125,7 +125,7 @@ def _present(value: Any) -> bool:
 def _first_non_null(raw: Mapping[str, Any], fields: Sequence[str]) -> Any:
     for field in fields:
         value = raw.get(field)
-        if value is not None:
+        if value is not None and (not isinstance(value, str) or bool(value.strip())):
             return value
     return None
 
@@ -154,7 +154,7 @@ def _identity(raw: Mapping[str, Any], record_type: str) -> _Identity:
     candidates: list[tuple[str, str | None]] = []
     invalid = False
     for field, source in fields:
-        if field not in raw or not _present(raw[field]):
+        if field not in raw or raw[field] is None:
             continue
         canonical = _canonical_id(raw[field], prefix)
         candidates.append((source, canonical))
@@ -181,7 +181,7 @@ def _relationship(raw: Mapping[str, Any], record_type: str) -> _Relationship:
     post_candidates: list[tuple[str, str | None]] = []
     invalid_post = False
     for field in post_fields:
-        if field not in raw or not _present(raw[field]):
+        if field not in raw or raw[field] is None:
             continue
         canonical = _canonical_id(raw[field], "t3_")
         post_candidates.append((field, canonical))
@@ -198,7 +198,7 @@ def _relationship(raw: Mapping[str, Any], record_type: str) -> _Relationship:
         reasons.append("RELATIONSHIP_CONFLICT")
 
     parent_id: str | None = None
-    if "parent_id" in raw and _present(raw["parent_id"]):
+    if "parent_id" in raw and raw["parent_id"] is not None:
         parent_id = _canonical_parent_id(raw["parent_id"])
         if parent_id is None:
             reasons.append("INVALID_PARENT_ID")
