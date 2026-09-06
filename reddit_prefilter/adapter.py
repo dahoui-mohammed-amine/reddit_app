@@ -7,6 +7,19 @@ from typing import Any
 
 from .models import RawRecord, SourceLineage
 
+_LINEAGE_FIELDS = frozenset(
+    {
+        "provider",
+        "observed_at",
+        "source_url",
+        "request_id",
+        "run_id",
+        "response_status",
+        "cache_status",
+        "metadata",
+    }
+)
+
 
 class AdapterError(ValueError):
     """The fixture does not satisfy the explicit pre-filter envelope."""
@@ -20,6 +33,8 @@ def _lineage(value: Any, default: SourceLineage | None) -> Any:
     if not isinstance(value, Mapping):
         return value
     if "provider" not in value or "observed_at" not in value:
+        return value
+    if any(key not in _LINEAGE_FIELDS for key in value):
         return value
     lineage = SourceLineage(
         provider=value["provider"],

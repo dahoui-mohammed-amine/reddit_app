@@ -22,8 +22,6 @@ def _canonical_dump(value: Any) -> str:
 
 def _canonicalize(value: Any) -> Any:
     if isinstance(value, Mapping):
-        if all(isinstance(key, str) for key in value):
-            return {key: _canonicalize(item) for key, item in value.items()}
         entries = [
             {
                 "key_type": f"{type(key).__module__}.{type(key).__qualname__}",
@@ -33,7 +31,7 @@ def _canonicalize(value: Any) -> Any:
             for key, item in value.items()
         ]
         entries.sort(key=lambda entry: (entry["key_type"], _canonical_dump(entry["key"])))
-        return {"__mapping__": entries}
+        return {"__canonical_type__": "mapping", "entries": entries}
     if isinstance(value, (list, tuple)):
         return [_canonicalize(item) for item in value]
     if isinstance(value, (set, frozenset)):

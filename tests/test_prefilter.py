@@ -575,6 +575,20 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(result.decisions[2].status, "accepted")
         self.assertEqual(len(result.decisions[2].evidence_id), 64)
 
+    def test_mapping_tag_cannot_collide_with_literal_mapping_data(self) -> None:
+        mixed = RawRecord("post", {1: "v"}, self.lineage)
+        literal = RawRecord(
+            "post",
+            {
+                "__mapping__": [
+                    {"key_type": "builtins.int", "key": 1, "value": "v"}
+                ]
+            },
+            self.lineage,
+        )
+
+        self.assertNotEqual(mixed.evidence_id, literal.evidence_id)
+
     def test_surrogate_content_keeps_evidence_hashes_nonempty(self) -> None:
         record = RawRecord(
             "post",
@@ -741,6 +755,30 @@ class PrefilterTests(unittest.TestCase):
             [("INVALID_SUBREDDIT",), ("INVALID_SUBREDDIT",)],
         )
 
+    def test_blank_adapter_context_is_invalid(self) -> None:
+        records = tuple(
+            RawRecord(
+                "post",
+                {"id": f"post-blank-context-{index}", "title": "Enough"},
+                self.lineage,
+                value,
+            )
+            for index, value in enumerate(("", " "))
+        )
+
+        for config in (PrefilterConfig(), PrefilterConfig(subreddit_scope=("freelance",))):
+            with self.subTest(config=config):
+                decisions = Prefilter(config).evaluate(records).decisions
+
+                self.assertEqual(
+                    [decision.status for decision in decisions],
+                    ["incomplete", "incomplete"],
+                )
+                self.assertEqual(
+                    [decision.reason_codes for decision in decisions],
+                    [("INVALID_SUBREDDIT",), ("INVALID_SUBREDDIT",)],
+                )
+
     def test_malformed_content_state_is_incomplete(self) -> None:
         deleted = RawRecord(
             "post",
@@ -779,19 +817,60 @@ class PrefilterTests(unittest.TestCase):
             },
             self.lineage,
         )
+        numeric_deleted = RawRecord(
+            "post",
+            {
+                "id": "post-numeric-deleted-state",
+                "deleted": 2,
+                "title": "A visible post with enough text",
+            },
+            self.lineage,
+        )
+        numeric_category = RawRecord(
+            "post",
+            {
+                "id": "post-numeric-category-state",
+                "removed_by_category": 1,
+                "title": "A visible post with enough text",
+            },
+            self.lineage,
+        )
 
         decisions = Prefilter().evaluate(
-            (deleted, removed, corrupt_deleted, corrupt_removed)
+            (deleted, removed, corrupt_deleted, corrupt_removed, numeric_deleted, numeric_category)
         ).decisions
 
         self.assertEqual(
             [decision.status for decision in decisions],
-            ["incomplete", "incomplete", "incomplete", "incomplete"],
+            ["incomplete", "incomplete", "incomplete", "incomplete", "incomplete", "incomplete"],
         )
         self.assertEqual(
             [decision.reason_codes for decision in decisions],
-            [("INVALID_CONTENT_STATE",)] * 4,
+            [("INVALID_CONTENT_STATE",)] * 6,
         )
+
+    def test_fixture_preserves_unmodeled_lineage_fields(self) -> None:
+        records = records_from_fixture(
+            {
+                "records": [
+                    {
+                        "record_type": "post",
+                        "lineage": {
+                            "provider": "fixture",
+                            "observed_at": "2026-09-05T00:00:00Z",
+                            "source_batch": "b1",
+                        },
+                        "raw": {"id": "post-unmodeled-lineage", "title": "Enough"},
+                    }
+                ]
+            }
+        )
+
+        result = Prefilter().evaluate(records)
+
+        self.assertEqual(result.decisions[0].status, "incomplete")
+        self.assertEqual(result.decisions[0].reason_codes, ("INVALID_SOURCE_LINEAGE",))
+        self.assertEqual(result.to_dict()["records"][0]["lineage"]["source_batch"], "b1")
 
     def test_non_string_content_is_incomplete(self) -> None:
         record = RawRecord(

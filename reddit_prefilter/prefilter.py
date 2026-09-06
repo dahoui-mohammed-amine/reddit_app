@@ -247,6 +247,8 @@ def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, s
         normalized_raw = _strip_subreddit_prefix(raw_value)
         if not normalized_raw or any(char.isspace() for char in normalized_raw):
             return None, "invalid", ("INVALID_SUBREDDIT",)
+    if context_value is not None and not _present(context_value):
+        return None, "invalid", ("INVALID_SUBREDDIT",)
     if _present(raw_value) and _present(context_value):
         raw_subreddit = _strip_subreddit_prefix(raw_value).casefold()
         context_subreddit = _strip_subreddit_prefix(context_value).casefold()
@@ -276,11 +278,15 @@ def _invalid_content(raw: Mapping[str, Any], record_type: str) -> bool:
 
 
 def _valid_state_value(value: Any, *, category: bool = False) -> bool:
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None:
+        return True
+    if category:
+        return isinstance(value, str)
+    if isinstance(value, bool):
         return True
     if not isinstance(value, str):
         return False
-    return category or value.strip().casefold() in _FALSE_STATE_TOKENS | _TRUE_STATE_TOKENS
+    return value.strip().casefold() in _FALSE_STATE_TOKENS | _TRUE_STATE_TOKENS
 
 
 def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool, bool]:
@@ -302,8 +308,6 @@ def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool
     def flagged(value: Any, *, category: bool = False) -> bool:
         if isinstance(value, bool):
             return value
-        if isinstance(value, (int, float)):
-            return value != 0
         if not isinstance(value, str):
             return False
         folded = value.strip().casefold()
