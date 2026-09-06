@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -911,6 +911,7 @@ class BrightDataProvider(HttpProviderBase):
     posts_dataset_id = "gd_lvz8ah06191smkebj4"
     comments_dataset_id = "gd_lvzdpsdlw09j6t702"
     max_sync_inputs = 20
+    reddit_hosts = frozenset({"www.reddit.com", "reddit.com", "old.reddit.com", "redd.it"})
 
     def __init__(self, config: Config, client: JsonClient | None = None):
         self.config = config
@@ -988,24 +989,36 @@ class BrightDataProvider(HttpProviderBase):
     def _subreddit_key(subreddit: str) -> str:
         return subreddit.removeprefix("r/").casefold()
 
-    @staticmethod
-    def _canonical_url(value: Any) -> str | None:
+    @classmethod
+    def _absolute_reddit_url(cls, value: Any) -> str | None:
         if not isinstance(value, str) or not value.strip():
             return None
         value = value.strip()
-        if value.startswith("/"):
-            value = f"https://www.reddit.com{value}"
-        return value.rstrip("/").casefold()
+        if "://" in value and not value.startswith(("http://", "https://")):
+            return None
+        candidate = value if value.startswith(("http://", "https://")) else f"https://www.reddit.com{value if value.startswith('/') else '/' + value}"
+        try:
+            parsed = urlparse(candidate)
+            hostname = parsed.hostname
+        except ValueError:
+            return None
+        if parsed.scheme.casefold() not in {"http", "https"} or hostname is None or hostname.casefold() not in cls.reddit_hosts:
+            return None
+        return candidate
 
     @classmethod
-    def _absolute_reddit_url(cls, value: str) -> str:
-        return value if value.startswith(("http://", "https://")) else f"https://www.reddit.com{value if value.startswith('/') else '/' + value}"
+    def _canonical_url(cls, value: Any) -> str | None:
+        absolute = cls._absolute_reddit_url(value)
+        return absolute.rstrip("/").casefold() if absolute else None
 
     @classmethod
     def _post_url_id(cls, value: Any) -> str | None:
         if not isinstance(value, str) or not value.strip():
             return None
-        path = urlparse(cls._absolute_reddit_url(value.strip())).path.strip("/").split("/")
+        absolute = cls._absolute_reddit_url(value)
+        if absolute is None:
+            return None
+        path = urlparse(absolute).path.strip("/").split("/")
         try:
             comments_index = next(index for index, item in enumerate(path) if item.casefold() == "comments")
         except StopIteration:
@@ -1020,7 +1033,10 @@ class BrightDataProvider(HttpProviderBase):
             return None
         value = value.strip()
         if "://" in value or value.startswith("/"):
-            path = urlparse(value).path.strip("/").split("/")
+            absolute = cls._absolute_reddit_url(value)
+            if absolute is None:
+                return None
+            path = urlparse(absolute).path.strip("/").split("/")
             try:
                 index = next(index for index, item in enumerate(path) if item.casefold() == "r")
             except StopIteration:
@@ -1028,6 +1044,11 @@ class BrightDataProvider(HttpProviderBase):
             return path[index + 1] if index + 1 < len(path) and path[index + 1] else None
         value = value.strip("/")
         return value[2:] if value.casefold().startswith("r/") else value
+
+    @classmethod
+    def _record_urls_valid(cls, raw: Mapping[str, Any]) -> bool:
+        values = [raw.get(key) for key in ("url", "post_url", "permalink") if raw.get(key)]
+        return all(cls._absolute_reddit_url(value) is not None for value in values)
 
     @classmethod
     def _record_subreddit(cls, raw: Mapping[str, Any]) -> str | None:
@@ -1084,7 +1105,14 @@ class BrightDataProvider(HttpProviderBase):
     def _unavailable_like(cls, error: Any, status: int | None = None) -> bool:
         if status == 404:
             return True
-        text = cls._error_text(error).casefold()
+        if isinstance(error, Mapping):
+            text = " ".join(
+                cls._error_text(error[key])
+                for key in ("error", "message", "reason", "code", "status", "status_code", "error_code")
+                if key in error
+            ).casefold()
+        else:
+            text = cls._error_text(error).casefold()
         return any(term in text for term in ("deleted", "removed", "not found", "unavailable", "private", "restricted", "404"))
 
     @classmethod
@@ -1266,6 +1294,9 @@ class BrightDataProvider(HttpProviderBase):
                     if "error" in raw and not any(key in raw for key in ("id", "post_id", "fullname", "name")):
                         errors.append(raw)
                         continue
+                    if not self._record_urls_valid(raw):
+                        unattributed_record = True
+                        continue
                     subreddit = self._record_subreddit(raw)
                     key = self._subreddit_key(subreddit) if subreddit else None
                     if key not in by_subreddit:
@@ -1366,6 +1397,8 @@ class BrightDataProvider(HttpProviderBase):
         requested_url = self._requested_post_url(post)
         requested_url_id = self._post_url_id(requested_url)
         raw_url_values = [raw.get(key) for key in ("url", "post_url", "permalink") if raw.get(key)]
+        if any(self._absolute_reddit_url(value) is None for value in raw_url_values):
+            return False
         raw_url_ids = {url_id for value in raw_url_values if (url_id := self._post_url_id(value)) is not None}
         try:
             raw_post_id = post_id(raw).casefold()
@@ -1380,17 +1413,6 @@ class BrightDataProvider(HttpProviderBase):
         if requested_canonical is not None and any(self._canonical_url(value) == requested_canonical for value in raw_url_values):
             return raw_post_id is None or raw_post_id == post.post_id.casefold()
         return raw_post_id == post.post_id.casefold()
-
-    @classmethod
-    def _tombstone_for_error(cls, post: PostSnapshot, error: Any, target_url: str, observed_at: str) -> PostSnapshot | None:
-        if not isinstance(error, Mapping) or cls._error_matches(error, None) or not cls._error_matches(error, target_url):
-            return None
-        text = cls._error_text(error).casefold()
-        if "deleted" in text:
-            return replace(post, deleted=True, deletion_known=True, observed_at=observed_at)
-        if "removed" in text:
-            return replace(post, removed=True, removal_known=True, observed_at=observed_at)
-        return None
 
     @staticmethod
     def _comments_unsupported_gap(post: PostSnapshot, mode: str) -> Gap:
@@ -1464,11 +1486,6 @@ class BrightDataProvider(HttpProviderBase):
                 if raw is None:
                     if target_errors:
                         gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=item) for item in target_errors)
-                        tombstone = next((self._tombstone_for_error(post, item, requested_url, fetched_at) for item in target_errors), None)
-                        if tombstone is not None:
-                            all_posts.append(tombstone)
-                            if batch_record is not None:
-                                observation_requests[post.post_id] = batch_record
                     else:
                         gaps.append(Gap("post", "not_returned", entity_id=post.post_id, subreddit=post.subreddit, detail="Bright Data returned no record for this requested URL"))
                     continue

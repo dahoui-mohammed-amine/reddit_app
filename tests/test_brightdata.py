@@ -9,7 +9,7 @@ from unittest import mock
 
 from reddit_ingestion.config import Config
 from reddit_ingestion.db import Database
-from reddit_ingestion.models import PageResult, PostSnapshot
+from reddit_ingestion.models import PostSnapshot
 from reddit_ingestion.providers import BrightDataProvider, HttpResponse, JsonClient
 from reddit_ingestion.runner import run_once
 
@@ -216,59 +216,45 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(result.posts, [])
         self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
 
-    def test_deleted_refresh_error_creates_tombstone_and_purges_raw_evidence(self) -> None:
-        raw_error = {"url": "https://www.reddit.com/r/smallbusiness/comments/p/title/", "error": "deleted post"}
+    def test_refresh_error_with_deleted_url_slug_remains_report_only(self) -> None:
+        requested = "https://www.reddit.com/r/smallbusiness/comments/p/deleted-project/"
+        raw_error = {"url": requested, "error": "temporary provider failure"}
 
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
                 return [raw_error], HttpResponse(200, {}, b""), "request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
-            root = Path(directory)
-            cfg = config(root)
-            db = Database(cfg.database_path)
-            existing = PostSnapshot("p", "t3_p", "smallbusiness", title="title", body="body", author="author", permalink="/r/smallbusiness/comments/p/title/", observed_at=OBSERVED)
-            run_id = db.start_run("brightdata", "discover", {}, OBSERVED)
-            with db.transaction():
-                db.save_page(run_id, "brightdata", "smallbusiness", PageResult([existing], None, None, OBSERVED, "fixture://p", 200, "request"))
-            result = BrightDataProvider(cfg, client=Client()).refresh_posts([existing], cfg)
-            self.assertTrue(result.posts[0].deleted)
-            with db.transaction():
-                db.save_refresh(run_id, "brightdata", result)
-            row = db.connection.execute("SELECT title, body, author, deleted FROM posts WHERE post_id='p'").fetchone()
-            self.assertEqual(tuple(row), (None, None, None, 1))
-            self.assertGreaterEqual(db.purge_deleted_content(), 0)
-            request_metadata = [json.loads(row[0]) for row in db.connection.execute("SELECT metadata_json FROM requests WHERE provider='brightdata'")]
-            observation_metadata = [json.loads(row[0]) for row in db.connection.execute("SELECT metadata_json FROM post_observations WHERE provider='brightdata'")]
-            self.assertTrue(request_metadata)
-            self.assertTrue(observation_metadata)
-            self.assertTrue(all("raw_payload" not in metadata for metadata in request_metadata))
-            self.assertTrue(all("raw_payload" not in metadata for metadata in observation_metadata))
-            db.close()
+            cfg = config(Path(directory))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink=requested)], cfg
+            )
 
-    def test_raw_brightdata_evidence_expires_from_requests_and_observations(self) -> None:
-        raw = post_record("smallbusiness")
+        self.assertEqual(result.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" and gap.entity_id == "p" for gap in result.gaps))
 
-        class Client:
+    def test_non_reddit_urls_are_rejected_for_discovery_and_refresh(self) -> None:
+        external_url = "https://evil.example/r/smallbusiness/comments/p/deleted-project/"
+
+        class DiscoveryClient:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
-                return [raw], HttpResponse(200, {}, b""), "request"
+                return [{"post_id": "p", "url": external_url, "community_name": "smallbusiness"}], HttpResponse(200, {}, b""), "request"
+
+        class RefreshClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [{"post_id": "p", "url": external_url}], HttpResponse(200, {}, b""), "request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
-            root = Path(directory)
-            cfg = config(root)
-            db = Database(cfg.database_path)
-            run_once(db, BrightDataProvider(cfg, client=Client()), cfg, "discover", allow_paid=True)
-            db.connection.execute("UPDATE requests SET requested_at = '2000-01-01 00:00:00'")
-            db.connection.execute("UPDATE post_observations SET observed_at = '2000-01-01T00:00:00Z'")
-            db.connection.commit()
-            self.assertEqual(db.purge_raw_evidence(1), 2)
-            request_metadata = json.loads(db.connection.execute("SELECT metadata_json FROM requests WHERE provider='brightdata'").fetchone()[0])
-            observation_metadata = json.loads(db.connection.execute("SELECT metadata_json FROM post_observations WHERE provider='brightdata'").fetchone()[0])
-            self.assertNotIn("raw_payload", request_metadata)
-            self.assertNotIn("raw_payload", observation_metadata)
-            self.assertTrue(request_metadata["raw_evidence_purged"])
-            self.assertTrue(observation_metadata["raw_evidence_purged"])
-            db.close()
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            discovered = BrightDataProvider(cfg, client=DiscoveryClient()).discover("smallbusiness", None, cfg)
+            refreshed = BrightDataProvider(cfg, client=RefreshClient()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertEqual(discovered.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in discovered.gaps))
+        self.assertEqual(refreshed.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in refreshed.gaps))
 
     def test_202_snapshot_is_a_safe_unsupported_result_without_followup(self) -> None:
         calls: list[int] = []

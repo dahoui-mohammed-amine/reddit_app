@@ -118,9 +118,8 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 
 
 class Database:
-    def __init__(self, path: Path, refresh_expiry_days: int = 30, raw_evidence_retention_days: int = 30):
+    def __init__(self, path: Path, refresh_expiry_days: int = 30):
         self.path = path
-        self.raw_evidence_retention_days = max(1, int(raw_evidence_retention_days))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
@@ -444,50 +443,6 @@ class Database:
             billed = False if provider == "fixture" else False if cache_status == "cached" else None
         self.connection.execute("INSERT INTO requests(request_id, run_id, provider, operation, requested_at, response_status, billed, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)", (request_id, run_id, provider, operation, status, None if billed is None else int(billed), cache_status, cache_observed_at, json.dumps(request_metadata, sort_keys=True)))
 
-    @staticmethod
-    def _purge_raw_metadata(metadata_json: str) -> tuple[str, bool]:
-        try:
-            metadata = json.loads(metadata_json)
-        except (TypeError, json.JSONDecodeError):
-            return metadata_json, False
-        if not isinstance(metadata, dict):
-            return metadata_json, False
-        changed = False
-        for key in ("raw_payload", "provider_error"):
-            if key in metadata:
-                del metadata[key]
-                changed = True
-        if not changed:
-            return metadata_json, False
-        metadata["raw_evidence_purged"] = True
-        return json.dumps(metadata, sort_keys=True), True
-
-    def _purge_raw_evidence_rows(self, retention_days: int, *, force: bool = False) -> int:
-        request_query = "SELECT request_event_id, metadata_json FROM requests WHERE provider = 'brightdata'"
-        observation_query = "SELECT observation_id, metadata_json FROM post_observations WHERE provider = 'brightdata'"
-        params: tuple[object, ...] = ()
-        if not force:
-            cutoff = f"-{max(1, int(retention_days))} days"
-            request_query += " AND datetime(requested_at) <= datetime('now', ?)"
-            observation_query += " AND datetime(observed_at) <= datetime('now', ?)"
-            params = (cutoff,)
-        purged = 0
-        for table, query, key in (
-            ("requests", request_query, "request_event_id"),
-            ("post_observations", observation_query, "observation_id"),
-        ):
-            for row in self.connection.execute(query, params).fetchall():
-                metadata_json, changed = self._purge_raw_metadata(row["metadata_json"])
-                if changed:
-                    self.connection.execute(f"UPDATE {table} SET metadata_json = ? WHERE {key} = ?", (metadata_json, row[key]))
-                    purged += 1
-        return purged
-
-    def purge_raw_evidence(self, retention_days: int | None = None) -> int:
-        days = self.raw_evidence_retention_days if retention_days is None else max(1, int(retention_days))
-        with self.transaction():
-            return self._purge_raw_evidence_rows(days)
-
     def refreshable_post_count(self, subreddits: tuple[str, ...], refresh_expiry_days: int = 30) -> int:
         if not subreddits:
             return 0
@@ -512,11 +467,8 @@ class Database:
         return [PostSnapshot(post_id=row["post_id"], fullname=row["fullname"], subreddit=row["subreddit"], title=row["title"], body=row["body"], author=row["author"], permalink=row["permalink"], url=row["url"], created_at=row["created_at"], score=row["score"], ups=row["ups"], upvote_ratio=row["upvote_ratio"], num_comments=row["num_comments"], archived=bool(row["archived"]), locked=bool(row["locked"]), deleted=bool(row["deleted"]), removed=bool(row["removed"]), observed_at=row["observed_at"], refresh_until=row["refresh_until"]) for row in rows]
 
     def purge_deleted_content(self) -> int:
-        has_takedown = bool(self.connection.execute("SELECT 1 FROM posts WHERE deleted = 1 OR removed = 1 LIMIT 1").fetchone()) or bool(self.connection.execute("SELECT 1 FROM comments WHERE deleted = 1 OR removed = 1 LIMIT 1").fetchone())
         post_count = self.connection.execute("UPDATE posts SET title=NULL, body=NULL, author=NULL WHERE deleted=1 OR removed=1").rowcount
         self.connection.execute("UPDATE comments SET body=NULL, author=NULL WHERE deleted=1 OR removed=1")
-        if has_takedown:
-            self._purge_raw_evidence_rows(self.raw_evidence_retention_days, force=True)
         self.connection.commit()
         return post_count
 

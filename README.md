@@ -29,7 +29,6 @@ Copy `config.example.toml` and edit the explicit `[ingestion]`, `[comments]`, an
 - `comments.mode` is `bounded` or `full`. Bounded mode records explicit gaps when depth/limit truncates comments. Full mode is opt-in; FetchLayer reports full expansion as unsupported.
 - `provider.min_request_interval_seconds` paces live requests before each attempt; retry backoff and provider retry-after values still apply.
 - `provider.name` is `fixture`, `redditapis`, `fetchlayer`, or `brightdata`; fixture remains the safe default.
-- `provider.raw_evidence_retention_days` bounds retained Bright Data raw request evidence; the purge command removes it when a post or comment is marked deleted or removed.
 
 ## Provider access and cost gate
 
@@ -75,7 +74,7 @@ Deleted or removed content clears mutable text/author fields while retaining sta
 uv run reddit-ingest purge --config config.toml
 ```
 
-Bright Data raw request evidence is retained only for the configured bounded period and is purged with deleted/removed content. This is not an immutable raw Reddit archive. Confirm applicable Reddit/provider retention and deletion obligations before storing live content.
+This is not an immutable raw Reddit archive. Confirm applicable Reddit/provider retention and deletion obligations before storing live content.
 
 ## One-shot scheduling
 
