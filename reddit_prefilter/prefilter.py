@@ -21,6 +21,7 @@ DEFAULT_SPAM_MARKERS = (
 )
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_QUALIFIED_ID_RE = re.compile(r"^t\d+_")
 _REASON_ORDER = (
     "MALFORMED_RECORD",
     "MISSING_SOURCE_LINEAGE",
@@ -98,18 +99,6 @@ class PrefilterConfig:
         if any(not isinstance(item, str) or not item.strip() for item in self.spam_markers):
             raise ValueError("spam_markers must contain non-empty strings")
 
-    @property
-    def min_text_length(self) -> int:
-        """Short alias for callers configuring the rule programmatically."""
-
-        return self.minimum_text_length
-
-    @property
-    def subreddits(self) -> tuple[str, ...]:
-        """Ingestion-compatible name for the configured subreddit scope."""
-
-        return self.subreddit_scope
-
 
 @dataclass(frozen=True, slots=True)
 class _Identity:
@@ -130,13 +119,21 @@ def _present(value: Any) -> bool:
     return value is not None and (not isinstance(value, str) or bool(value.strip()))
 
 
+def _first_non_null(raw: Mapping[str, Any], fields: Sequence[str]) -> Any:
+    for field in fields:
+        value = raw.get(field)
+        if value is not None:
+            return value
+    return None
+
+
 def _canonical_id(value: Any, prefix: str) -> str | None:
     if not _present(value):
         return None
     if isinstance(value, bool):
         return None
     candidate = str(value).strip()
-    if candidate.startswith("t1_") or candidate.startswith("t3_"):
+    if _QUALIFIED_ID_RE.match(candidate):
         if not candidate.startswith(prefix):
             return None
         candidate = candidate[3:]
@@ -212,14 +209,16 @@ def _canonical_parent_id(value: Any) -> str | None:
     if not _present(value) or isinstance(value, bool):
         return None
     candidate = str(value).strip()
-    if candidate.startswith("t1_") or candidate.startswith("t3_"):
+    if _QUALIFIED_ID_RE.match(candidate):
+        if not (candidate.startswith("t1_") or candidate.startswith("t3_")):
+            return None
         suffix = candidate[3:]
         return candidate if suffix and _IDENTIFIER_RE.fullmatch(suffix) else None
     return candidate if _IDENTIFIER_RE.fullmatch(candidate) else None
 
 
 def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, str, tuple[str, ...]]:
-    raw_value = raw.get("subreddit", raw.get("community"))
+    raw_value = raw.get("subreddit")
     context_value = record.subreddit
     reasons: list[str] = []
     if _present(raw_value) and _present(context_value):
@@ -275,9 +274,9 @@ def _content_state(raw: Mapping[str, Any]) -> tuple[bool, bool]:
 
 def _normalized_content(raw: Mapping[str, Any], record_type: str) -> str:
     if record_type == "post":
-        values = [raw.get("title"), raw.get("selftext", raw.get("body", raw.get("bodyText", raw.get("text"))))]
+        values = [raw.get("title"), _first_non_null(raw, ("selftext", "body", "bodyText", "text"))]
     else:
-        values = [raw.get("body", raw.get("bodyText", raw.get("text")))]
+        values = [_first_non_null(raw, ("body", "bodyText", "text"))]
     return " ".join(str(value).strip() for value in values if value is not None).strip()
 
 
@@ -462,10 +461,10 @@ class Prefilter:
         metadata: dict[str, Any],
     ) -> Decision:
         ordered = _ordered_reasons(reasons)
-        if "DUPLICATE_RECORD" in reasons or reasons.intersection(_REJECTED_REASONS):
-            status = "rejected"
-        elif reasons.intersection(_INCOMPLETE_REASONS):
+        if reasons.intersection(_INCOMPLETE_REASONS):
             status = "incomplete"
+        elif "DUPLICATE_RECORD" in reasons or reasons.intersection(_REJECTED_REASONS):
+            status = "rejected"
         else:
             status = "accepted"
         metadata["decision_reason_codes"] = list(ordered)

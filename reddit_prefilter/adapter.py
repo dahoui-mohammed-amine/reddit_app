@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 import json
 from typing import Any
@@ -91,8 +91,3 @@ def load_fixture(
         raise AdapterError(f"could not load fixture {fixture_path}: {exc}") from exc
     return records_from_fixture(payload, default_lineage=default_lineage)
 
-
-def ensure_records(records: Iterable[RawRecord]) -> tuple[RawRecord, ...]:
-    """Materialize an adapter stream while keeping its ordering stable."""
-
-    return tuple(records)

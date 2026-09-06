@@ -26,11 +26,12 @@ records = [
 result = Prefilter(PrefilterConfig(minimum_text_length=20, subreddit_scope=("freelance",))).evaluate(records)
 ```
 
-`RawRecord.raw` is the untouched provider mapping. `SourceLineage` carries the
-provider, observation time, source URL, request/run identifiers, response and
-cache metadata. A comment may carry `subreddit` on `RawRecord` as adapter
-context when that field is absent from the comment payload; its raw
-`link_id`/`post_id` and `parent_id` are still preserved and checked.
+`RawRecord.raw` is an immutable snapshot of the untouched provider mapping.
+`SourceLineage` carries the provider, observation time, source URL, request/run
+identifiers, response and cache metadata. A comment may carry `subreddit` on
+`RawRecord` as adapter context when that field is absent from the comment
+payload; its raw `link_id`/`post_id` and `parent_id` are still preserved and
+checked.
 
 A fixture can use the same envelope through `records_from_fixture` or
 `load_fixture`:

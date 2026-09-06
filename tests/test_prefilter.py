@@ -197,6 +197,139 @@ class PrefilterTests(unittest.TestCase):
         ).decisions[0]
         self.assertEqual(no_scope.status, "accepted")
 
+    def test_invalid_lineage_is_auditable_and_raw_evidence_is_snapshotted(self) -> None:
+        raw = {
+            "id": "post-snapshot",
+            "title": "Original title",
+            "details": {"source": "original"},
+        }
+        record = RawRecord("post", raw, {})
+        result = Prefilter().evaluate((record,))
+        decision = result.decisions[0]
+        before = json.dumps(result.to_dict(), sort_keys=True)
+
+        raw["title"] = "Changed title"
+        raw["details"]["source"] = "changed"
+
+        self.assertEqual(decision.status, "incomplete")
+        self.assertEqual(decision.reason_codes, ("INVALID_SOURCE_LINEAGE",))
+        self.assertEqual(json.dumps(result.to_dict(), sort_keys=True), before)
+        self.assertEqual(result.records[0].raw["title"], "Original title")
+        self.assertEqual(result.records[0].raw["details"]["source"], "original")
+        with self.assertRaises(TypeError):
+            result.records[0].raw["title"] = "not mutable"
+
+    def test_unsupported_qualified_ids_and_relationships_are_incomplete(self) -> None:
+        post = RawRecord(
+            "post",
+            {"id": "t2_comment", "title": "A sufficiently long post"},
+            self.lineage,
+        )
+        comment_relationship = RawRecord(
+            "comment",
+            {
+                "id": "comment-typed-link",
+                "link_id": "t2_post",
+                "body": "A sufficiently long comment body",
+            },
+            self.lineage,
+            "freelance",
+        )
+        comment_parent = RawRecord(
+            "comment",
+            {
+                "id": "comment-typed-parent",
+                "link_id": "post-parent",
+                "parent_id": "t2_parent",
+                "body": "A sufficiently long comment body",
+            },
+            self.lineage,
+            "freelance",
+        )
+
+        decisions = Prefilter().evaluate((post, comment_relationship, comment_parent)).decisions
+
+        self.assertEqual(decisions[0].status, "incomplete")
+        self.assertEqual(decisions[0].reason_codes, ("INVALID_IDENTIFIER",))
+        self.assertEqual(decisions[1].status, "incomplete")
+        self.assertEqual(decisions[1].reason_codes, ("INVALID_POST_RELATIONSHIP",))
+        self.assertEqual(decisions[2].status, "incomplete")
+        self.assertEqual(decisions[2].reason_codes, ("INVALID_PARENT_ID",))
+
+    def test_content_aliases_use_the_first_non_null_value(self) -> None:
+        post = RawRecord(
+            "post",
+            {
+                "id": "post-body-fallback",
+                "title": "A post title",
+                "selftext": None,
+                "body": "Buy now for a guaranteed result.",
+            },
+            self.lineage,
+        )
+        comment = RawRecord(
+            "comment",
+            {
+                "id": "comment-bodytext-fallback",
+                "link_id": "post-body-fallback",
+                "body": None,
+                "bodyText": "Click here for a guaranteed result.",
+            },
+            self.lineage,
+        )
+
+        decisions = Prefilter().evaluate((post, comment)).decisions
+
+        self.assertEqual(decisions[0].status, "rejected")
+        self.assertEqual(decisions[0].reason_codes, ("SPAM_MARKER",))
+        self.assertEqual(decisions[1].status, "rejected")
+        self.assertEqual(decisions[1].reason_codes, ("SPAM_MARKER",))
+
+    def test_identifier_conflict_remains_incomplete_with_duplicate_evidence(self) -> None:
+        first = RawRecord(
+            "post",
+            {"id": "post-duplicate-conflict", "title": "A canonical post"},
+            self.lineage,
+        )
+        conflicting_duplicate = RawRecord(
+            "post",
+            {
+                "id": "post-duplicate-conflict",
+                "fullname": "t3-other-post",
+                "title": "A conflicting duplicate post",
+            },
+            self.lineage,
+        )
+
+        decisions = Prefilter().evaluate((first, conflicting_duplicate)).decisions
+
+        self.assertEqual(decisions[1].status, "incomplete")
+        self.assertEqual(
+            decisions[1].reason_codes,
+            ("IDENTIFIER_CONFLICT", "DUPLICATE_RECORD"),
+        )
+        self.assertEqual(decisions[1].metadata["duplicate_of"], decisions[0].evidence_id)
+
+    def test_removed_compatibility_aliases_and_community_fallback_are_not_public(self) -> None:
+        config = PrefilterConfig()
+        self.assertFalse(hasattr(config, "min_text_length"))
+        self.assertFalse(hasattr(config, "subreddits"))
+
+        record = RawRecord(
+            "post",
+            {
+                "id": "post-community-only",
+                "community": "freelance",
+                "title": "A post with enough text",
+            },
+            self.lineage,
+        )
+        decision = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
+            (record,)
+        ).decisions[0]
+        self.assertEqual(decision.status, "incomplete")
+        self.assertEqual(decision.reason_codes, ("SUBREDDIT_UNAVAILABLE",))
+
     def test_scope_and_marker_configuration_are_explicit(self) -> None:
         record = records_from_fixture(
             {

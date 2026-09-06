@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
 RecordType = Literal["post", "comment"]
@@ -32,6 +34,28 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {deepcopy(key): _freeze(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze(item) for item in value)
+    return deepcopy(value)
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {deepcopy(key): _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    if isinstance(value, frozenset):
+        return [_thaw(item) for item in value]
+    return deepcopy(value)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceLineage:
     """Provider evidence needed to trace a record back to its observation."""
@@ -49,19 +73,26 @@ class SourceLineage:
         return asdict(self)
 
 
+def _lineage_to_dict(lineage: Any) -> dict[str, Any] | None:
+    return lineage.to_dict() if isinstance(lineage, SourceLineage) else None
+
+
 @dataclass(frozen=True, slots=True)
 class RawRecord:
     """The adapter boundary: raw provider mapping plus observation lineage.
 
-    ``raw`` is never normalized or mutated by the pre-filter. ``subreddit`` is
-    optional adapter context for records (usually comments) whose provider
-    payload does not carry the parent post's subreddit.
+    ``raw`` is captured as an immutable snapshot and is never normalized by the
+    pre-filter. ``subreddit`` is optional adapter context for records (usually
+    comments) whose provider payload does not carry the parent post's subreddit.
     """
 
     record_type: str
     raw: Any
     lineage: SourceLineage | None = None
     subreddit: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "raw", _freeze(self.raw))
 
     @property
     def raw_sha256(self) -> str:
@@ -73,7 +104,7 @@ class RawRecord:
             {
                 "record_type": self.record_type,
                 "raw": self.raw,
-                "lineage": self.lineage.to_dict() if self.lineage else None,
+                "lineage": _lineage_to_dict(self.lineage),
                 "subreddit_context": self.subreddit,
             }
         )
@@ -81,8 +112,8 @@ class RawRecord:
     def to_dict(self) -> dict[str, Any]:
         return {
             "record_type": self.record_type,
-            "raw": self.raw,
-            "lineage": self.lineage.to_dict() if self.lineage else None,
+            "raw": _thaw(self.raw),
+            "lineage": _lineage_to_dict(self.lineage),
             "subreddit_context": self.subreddit,
             "raw_sha256": self.raw_sha256,
             "evidence_id": self.evidence_id,
@@ -110,7 +141,7 @@ class Decision:
             "record_id": self.record_id,
             "status": self.status,
             "reason_codes": list(self.reason_codes),
-            "lineage": self.lineage.to_dict() if self.lineage else None,
+            "lineage": _lineage_to_dict(self.lineage),
             "metadata": dict(self.metadata),
         }
 
