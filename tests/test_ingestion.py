@@ -81,6 +81,8 @@ class IngestionTests(unittest.TestCase):
             parse_comment({"id": "c", "parent_id": {"id": "c2"}}, post=post, observed_at=post.observed_at)
         with self.assertRaises(ValueError):
             parse_comment({"id": "c", "parent_id": "c2"}, post=post, observed_at=post.observed_at)
+        with self.assertRaises(ValueError):
+            parse_post({"id": "p", "title": {"bad": 1}})
 
     def test_comment_links_must_match_requested_post(self) -> None:
         post = parse_post({"id": "p1"}, observed_at="2026-09-05T00:00:00Z")
@@ -676,6 +678,32 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE entity_id='c' AND reason='provider_error'").fetchone()[0], 1)
             metadata = db.connection.execute("SELECT metadata_json FROM post_observations WHERE post_id='p2'").fetchone()[0]
             self.assertFalse(json.loads(metadata)["comments_expanded"])
+            db.close()
+
+    def test_deleted_comment_marks_observation_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            post = PostSnapshot(
+                "p",
+                "t3_p",
+                "freelance",
+                num_comments=1,
+                observed_at=observed,
+                comments=[CommentSnapshot("c", "t1_c", "p", deleted=True, deletion_known=True, observed_at=observed)],
+            )
+            with db.transaction():
+                db.save_page(
+                    run_id,
+                    "fixture",
+                    "freelance",
+                    PageResult([post], None, None, observed, "fixture://p", 200, "request", metadata={"comments_expanded": True}),
+                )
+            metadata = db.connection.execute("SELECT metadata_json FROM post_observations WHERE post_id='p'").fetchone()[0]
+            self.assertFalse(json.loads(metadata)["comments_expanded"])
+            self.assertEqual(db.connection.execute("SELECT reason FROM gaps WHERE entity_id='c'").fetchone()[0], "deleted")
             db.close()
 
     def test_partial_refresh_observation_preserves_source_created_at(self) -> None:

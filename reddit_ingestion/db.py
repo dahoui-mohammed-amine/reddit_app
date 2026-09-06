@@ -211,6 +211,7 @@ class Database:
                     page.gaps.append(Gap("comment", "provider_error", entity_id=comment.comment_id, subreddit=post.subreddit, detail="comment belongs to another post"))
                     continue
                 if comment.deleted or comment.removed:
+                    comments_incomplete = True
                     page.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
             self._save_observation(post, provider, page, result_metadata=self._observation_metadata(page, post.post_id, comments_incomplete=comments_incomplete))
             if post.deleted or post.removed:
@@ -242,6 +243,7 @@ class Database:
                     result.gaps.append(Gap("comment", "provider_error", entity_id=comment.comment_id, subreddit=post.subreddit, detail="comment belongs to another post"))
                     continue
                 if comment.deleted or comment.removed:
+                    comments_incomplete = True
                     result.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
             self._save_observation(
                 post,

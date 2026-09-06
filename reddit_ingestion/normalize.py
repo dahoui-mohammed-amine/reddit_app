@@ -21,6 +21,8 @@ def _value(raw: Mapping[str, Any], *keys: str) -> Any:
 def _text(value: Any) -> str | None:
     if value is None:
         return None
+    if not isinstance(value, (str, int, float, bool)):
+        raise ValueError("text value must be scalar")
     return str(value)
 
 
