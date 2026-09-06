@@ -20,18 +20,27 @@ def _lineage(value: Any, default: SourceLineage | None) -> SourceLineage | None:
     if not isinstance(value, Mapping):
         raise AdapterError("lineage must be an object")
     try:
-        return SourceLineage(
-            provider=str(value["provider"]),
-            observed_at=str(value["observed_at"]),
-            source_url=value.get("source_url"),
-            request_id=value.get("request_id"),
-            run_id=value.get("run_id"),
-            response_status=value.get("response_status"),
-            cache_status=value.get("cache_status"),
-            metadata=value.get("metadata", {}),
-        )
+        provider = value["provider"]
+        observed_at = value["observed_at"]
     except KeyError as exc:
         raise AdapterError(f"lineage is missing {exc.args[0]}") from exc
+    if (
+        not isinstance(provider, str)
+        or not provider.strip()
+        or not isinstance(observed_at, str)
+        or not observed_at.strip()
+    ):
+        raise AdapterError("lineage provider and observed_at must be non-empty strings")
+    return SourceLineage(
+        provider=provider,
+        observed_at=observed_at,
+        source_url=value.get("source_url"),
+        request_id=value.get("request_id"),
+        run_id=value.get("run_id"),
+        response_status=value.get("response_status"),
+        cache_status=value.get("cache_status"),
+        metadata=value.get("metadata", {}),
+    )
 
 
 def records_from_fixture(
@@ -90,4 +99,3 @@ def load_fixture(
     except (OSError, json.JSONDecodeError) as exc:
         raise AdapterError(f"could not load fixture {fixture_path}: {exc}") from exc
     return records_from_fixture(payload, default_lineage=default_lineage)
-

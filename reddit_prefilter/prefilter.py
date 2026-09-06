@@ -241,7 +241,7 @@ def _content_state(raw: Mapping[str, Any]) -> tuple[bool, bool]:
     deleted_markers = [raw[key] for key in ("deleted", "is_deleted") if key in raw]
     removed_markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
     deleted_content = [raw[key] for key in ("body", "bodyText", "selftext", "text") if key in raw]
-    removed_content = [raw[key] for key in ("body", "bodyText", "selftext") if key in raw]
+    removed_content = [raw[key] for key in ("body", "bodyText", "selftext", "text") if key in raw]
 
     def flagged(value: Any) -> bool:
         if isinstance(value, bool):
@@ -277,12 +277,20 @@ def _normalized_content(raw: Mapping[str, Any], record_type: str) -> str:
         values = [raw.get("title"), _first_non_null(raw, ("selftext", "body", "bodyText", "text"))]
     else:
         values = [_first_non_null(raw, ("body", "bodyText", "text"))]
-    return " ".join(str(value).strip() for value in values if value is not None).strip()
+    return " ".join(
+        " ".join(str(value).split())
+        for value in values
+        if value is not None
+    ).strip()
 
 
 def _marker_matches(text: str, markers: Sequence[str]) -> tuple[str, ...]:
-    folded = text.casefold()
-    matches = {marker.strip() for marker in markers if marker.casefold() in folded}
+    folded = " ".join(text.casefold().split())
+    matches = {
+        marker.strip()
+        for marker in markers
+        if " ".join(marker.casefold().split()) in folded
+    }
     return tuple(sorted(matches, key=lambda value: (value.casefold(), value)))
 
 

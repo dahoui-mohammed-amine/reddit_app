@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 import hashlib
 import json
 from types import MappingProxyType
@@ -69,8 +69,20 @@ class SourceLineage:
     cache_status: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _freeze(self.metadata))
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "provider": deepcopy(self.provider),
+            "observed_at": deepcopy(self.observed_at),
+            "source_url": deepcopy(self.source_url),
+            "request_id": deepcopy(self.request_id),
+            "run_id": deepcopy(self.run_id),
+            "response_status": deepcopy(self.response_status),
+            "cache_status": deepcopy(self.cache_status),
+            "metadata": _thaw(self.metadata),
+        }
 
 
 def _lineage_to_dict(lineage: Any) -> dict[str, Any] | None:

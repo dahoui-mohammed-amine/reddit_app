@@ -219,6 +219,25 @@ class PrefilterTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             result.records[0].raw["title"] = "not mutable"
 
+    def test_lineage_metadata_is_snapshotted_with_raw_evidence(self) -> None:
+        metadata = {"page": 1, "filters": ["new"]}
+        lineage = SourceLineage(
+            provider="fixture",
+            observed_at="2026-09-05T00:00:00Z",
+            metadata=metadata,
+        )
+        result = Prefilter().evaluate(
+            (RawRecord("post", {"id": "post-lineage-snapshot", "title": "Enough"}, lineage),)
+        )
+        before = result.to_dict()
+
+        metadata["page"] = 2
+        metadata["filters"].append("hot")
+
+        self.assertEqual(result.to_dict(), before)
+        with self.assertRaises(TypeError):
+            lineage.metadata["page"] = 3
+
     def test_unsupported_qualified_ids_and_relationships_are_incomplete(self) -> None:
         post = RawRecord(
             "post",
@@ -360,6 +379,62 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decision.status, "rejected")
         self.assertEqual(decision.reason_codes, ("SPAM_MARKER",))
         self.assertTrue(decision.metadata["scope_match"])
+
+    def test_fixture_rejects_null_required_lineage_fields(self) -> None:
+        for field in ("provider", "observed_at"):
+            lineage = {
+                "provider": "fixture",
+                "observed_at": "2026-09-05T00:00:00Z",
+            }
+            lineage[field] = None
+            with self.subTest(field=field):
+                with self.assertRaises(AdapterError):
+                    records_from_fixture(
+                        {
+                            "records": [
+                                {
+                                    "record_type": "post",
+                                    "lineage": lineage,
+                                    "raw": {"id": "post-invalid-fixture-lineage"},
+                                }
+                            ]
+                        }
+                    )
+
+    def test_text_content_detects_removed_markers_and_normalizes_whitespace(self) -> None:
+        removed = RawRecord(
+            "post",
+            {"id": "post-removed-text", "text": "[removed]"},
+            self.lineage,
+        )
+        marker = RawRecord(
+            "comment",
+            {
+                "id": "comment-whitespace-marker",
+                "link_id": "post-parent",
+                "body": "Buy\nnow",
+            },
+            self.lineage,
+        )
+        short = RawRecord(
+            "post",
+            {"id": "post-whitespace-short", "title": "A\t\nB"},
+            self.lineage,
+        )
+
+        removed_decision = Prefilter().evaluate((removed,)).decisions[0]
+        marker_decision = Prefilter().evaluate((marker,)).decisions[0]
+        short_decision = Prefilter(PrefilterConfig(minimum_text_length=4)).evaluate(
+            (short,)
+        ).decisions[0]
+
+        self.assertEqual(removed_decision.status, "rejected")
+        self.assertEqual(removed_decision.reason_codes, ("REMOVED_CONTENT",))
+        self.assertEqual(marker_decision.status, "rejected")
+        self.assertEqual(marker_decision.reason_codes, ("SPAM_MARKER",))
+        self.assertEqual(short_decision.status, "rejected")
+        self.assertEqual(short_decision.reason_codes, ("TEXT_TOO_SHORT",))
+        self.assertEqual(short_decision.metadata["text_length"], 3)
 
     def test_fixture_adapter_rejects_an_ambiguous_top_level_shape(self) -> None:
         with self.assertRaises(AdapterError):
