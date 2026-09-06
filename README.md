@@ -23,7 +23,9 @@ records = [
         ),
     )
 ]
-result = Prefilter(PrefilterConfig(minimum_text_length=20, subreddit_scope=("freelance",))).evaluate(records)
+result = Prefilter(
+    PrefilterConfig(minimum_text_length=20, subreddit_scope=("freelance",))
+).evaluate(records)
 ```
 
 `RawRecord.raw` is an immutable snapshot of the untouched provider mapping.

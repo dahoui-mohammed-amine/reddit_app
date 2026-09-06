@@ -5,8 +5,8 @@ from .models import Decision, PrefilterResult, RawRecord, SourceLineage
 from .prefilter import DEFAULT_SPAM_MARKERS, Prefilter, PrefilterConfig
 
 __all__ = [
-    "AdapterError",
     "DEFAULT_SPAM_MARKERS",
+    "AdapterError",
     "Decision",
     "Prefilter",
     "PrefilterConfig",

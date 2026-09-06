@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass, field
 import hashlib
 import json
+from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 RecordType = Literal["post", "comment"]
 DecisionStatus = Literal["accepted", "rejected", "incomplete"]

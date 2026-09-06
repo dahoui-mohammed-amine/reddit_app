@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
-import json
 from typing import Any
 
 from .models import RawRecord, SourceLineage
