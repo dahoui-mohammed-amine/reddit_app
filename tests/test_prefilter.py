@@ -466,7 +466,7 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decision.reason_codes, ("SPAM_MARKER",))
         self.assertTrue(decision.metadata["scope_match"])
 
-    def test_fixture_rejects_null_required_lineage_fields(self) -> None:
+    def test_fixture_preserves_malformed_required_lineage_fields(self) -> None:
         for field in ("provider", "observed_at"):
             lineage = {
                 "provider": "fixture",
@@ -474,37 +474,43 @@ class PrefilterTests(unittest.TestCase):
             }
             lineage[field] = None
             with self.subTest(field=field):
-                with self.assertRaises(AdapterError):
-                    records_from_fixture(
-                        {
-                            "records": [
-                                {
-                                    "record_type": "post",
-                                    "lineage": lineage,
-                                    "raw": {"id": "post-invalid-fixture-lineage"},
-                                }
-                            ]
-                        }
-                    )
+                records = records_from_fixture(
+                    {
+                        "records": [
+                            {
+                                "record_type": "post",
+                                "lineage": lineage,
+                                "raw": {"id": "post-invalid-fixture-lineage"},
+                            }
+                        ]
+                    }
+                )
+                decision = Prefilter().evaluate(records).decisions[0]
+                self.assertEqual(decision.status, "incomplete")
+                self.assertEqual(decision.reason_codes, ("INVALID_SOURCE_LINEAGE",))
+                self.assertEqual(records[0].to_dict()["lineage"][field], None)
 
-    def test_fixture_rejects_invalid_optional_lineage_fields(self) -> None:
+    def test_fixture_preserves_invalid_optional_lineage_fields(self) -> None:
         invalid_lineage = {
             "provider": "fixture",
             "observed_at": "2026-09-05T00:00:00Z",
             "source_url": [],
         }
-        with self.assertRaises(AdapterError):
-            records_from_fixture(
-                {
-                    "records": [
-                        {
-                            "record_type": "post",
-                            "lineage": invalid_lineage,
-                            "raw": {"id": "post-invalid-optional-lineage"},
-                        }
-                    ]
-                }
-            )
+        records = records_from_fixture(
+            {
+                "records": [
+                    {
+                        "record_type": "post",
+                        "lineage": invalid_lineage,
+                        "raw": {"id": "post-invalid-optional-lineage"},
+                    }
+                ]
+            }
+        )
+        decision = Prefilter().evaluate(records).decisions[0]
+        self.assertEqual(decision.status, "incomplete")
+        self.assertEqual(decision.reason_codes, ("INVALID_SOURCE_LINEAGE",))
+        self.assertEqual(records[0].to_dict()["lineage"], invalid_lineage)
 
     def test_invalid_direct_lineage_is_snapshotted_and_incomplete(self) -> None:
         source_url = ["fixture://source"]
@@ -629,19 +635,24 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decisions[2].status, "accepted")
         self.assertEqual(decisions[2].reason_codes, ("ACCEPTED",))
 
-    def test_fixture_rejects_non_string_subreddit_context(self) -> None:
-        with self.assertRaises(AdapterError):
-            records_from_fixture(
-                {
-                    "records": [
-                        {
-                            "record_type": "post",
-                            "subreddit_context": ["freelance"],
-                            "raw": {"id": "post-invalid-context"},
-                        }
-                    ]
-                }
-            )
+    def test_fixture_preserves_non_string_subreddit_context(self) -> None:
+        records = records_from_fixture(
+            {
+                "records": [
+                    {
+                        "record_type": "post",
+                        "subreddit_context": ["freelance"],
+                        "raw": {"id": "post-invalid-context"},
+                    }
+                ]
+            },
+            default_lineage=self.lineage,
+        )
+        decision = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
+            records
+        ).decisions[0]
+        self.assertEqual(decision.status, "incomplete")
+        self.assertEqual(decision.reason_codes, ("INVALID_SUBREDDIT",))
 
     def test_direct_invalid_subreddit_context_is_incomplete(self) -> None:
         record = RawRecord(
@@ -702,12 +713,36 @@ class PrefilterTests(unittest.TestCase):
             self.lineage,
         )
 
-        decisions = Prefilter().evaluate((deleted, removed)).decisions
+        corrupt_deleted = RawRecord(
+            "post",
+            {
+                "id": "post-corrupt-deleted-state",
+                "deleted": "corrupt",
+                "title": "A visible post with enough text",
+            },
+            self.lineage,
+        )
+        corrupt_removed = RawRecord(
+            "post",
+            {
+                "id": "post-corrupt-removed-state",
+                "is_removed": "corrupt",
+                "title": "A visible post with enough text",
+            },
+            self.lineage,
+        )
 
-        self.assertEqual([decision.status for decision in decisions], ["incomplete", "incomplete"])
+        decisions = Prefilter().evaluate(
+            (deleted, removed, corrupt_deleted, corrupt_removed)
+        ).decisions
+
+        self.assertEqual(
+            [decision.status for decision in decisions],
+            ["incomplete", "incomplete", "incomplete", "incomplete"],
+        )
         self.assertEqual(
             [decision.reason_codes for decision in decisions],
-            [("INVALID_CONTENT_STATE",), ("INVALID_CONTENT_STATE",)],
+            [("INVALID_CONTENT_STATE",)] * 4,
         )
 
     def test_non_string_content_is_incomplete(self) -> None:

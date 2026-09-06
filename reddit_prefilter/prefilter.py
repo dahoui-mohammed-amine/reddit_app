@@ -46,6 +46,8 @@ _REASON_ORDER = (
     "ACCEPTED",
 )
 _REASON_INDEX = {reason: index for index, reason in enumerate(_REASON_ORDER)}
+_FALSE_STATE_TOKENS = {"", "false", "0", "no", "none", "null"}
+_TRUE_STATE_TOKENS = {"true", "1", "yes"}
 _INCOMPLETE_REASONS = {
     "MALFORMED_RECORD",
     "MISSING_SOURCE_LINEAGE",
@@ -264,27 +266,41 @@ def _invalid_content(raw: Mapping[str, Any], record_type: str) -> bool:
     )
 
 
+def _valid_state_value(value: Any, *, category: bool = False) -> bool:
+    if value is None or isinstance(value, (bool, int, float)):
+        return True
+    if not isinstance(value, str):
+        return False
+    return category or value.strip().casefold() in _FALSE_STATE_TOKENS | _TRUE_STATE_TOKENS
+
+
 def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool, bool]:
     deleted_markers = [raw[key] for key in ("deleted", "is_deleted") if key in raw]
     removed_markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
-    state_values = deleted_markers + removed_markers
     if any(
-        value is not None and not isinstance(value, (bool, int, float, str))
-        for value in state_values
+        not _valid_state_value(raw[key])
+        for key in ("deleted", "is_deleted", "removed", "is_removed")
+        if key in raw
+    ) or (
+        "removed_by_category" in raw
+        and not _valid_state_value(raw["removed_by_category"], category=True)
     ):
         return False, False, True
     content_fields = _content_fields(record_type)
     deleted_content = [raw[key] for key in content_fields if key in raw]
     removed_content = [raw[key] for key in content_fields if key in raw]
 
-    def flagged(value: Any) -> bool:
+    def flagged(value: Any, *, category: bool = False) -> bool:
         if isinstance(value, bool):
             return value
         if isinstance(value, (int, float)):
             return value != 0
-        if value is None:
+        if not isinstance(value, str):
             return False
-        return str(value).strip().casefold() not in {"", "false", "0", "no", "none", "null"}
+        folded = value.strip().casefold()
+        if category:
+            return folded not in _FALSE_STATE_TOKENS
+        return folded in _TRUE_STATE_TOKENS
 
     def marked(values: Sequence[Any], words: set[str]) -> bool:
         return any(
@@ -301,7 +317,7 @@ def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool
     )
     # A non-empty removed_by_category is evidence of removal even when the
     # provider uses a category string rather than a boolean marker.
-    if any(flagged(raw.get(key)) for key in ("removed_by_category",)):
+    if any(flagged(raw.get(key), category=True) for key in ("removed_by_category",)):
         removed = True
     return deleted, removed, False
 

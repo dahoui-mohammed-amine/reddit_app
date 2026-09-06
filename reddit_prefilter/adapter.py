@@ -12,21 +12,18 @@ class AdapterError(ValueError):
     """The fixture does not satisfy the explicit pre-filter envelope."""
 
 
-def _lineage(value: Any, default: SourceLineage | None) -> SourceLineage | None:
+def _lineage(value: Any, default: SourceLineage | None) -> Any:
     if value is None:
         return default
     if isinstance(value, SourceLineage):
         return value
     if not isinstance(value, Mapping):
-        raise AdapterError("lineage must be an object")
-    try:
-        provider = value["provider"]
-        observed_at = value["observed_at"]
-    except KeyError as exc:
-        raise AdapterError(f"lineage is missing {exc.args[0]}") from exc
+        return value
+    if "provider" not in value or "observed_at" not in value:
+        return value
     lineage = SourceLineage(
-        provider=provider,
-        observed_at=observed_at,
+        provider=value["provider"],
+        observed_at=value["observed_at"],
         source_url=value.get("source_url"),
         request_id=value.get("request_id"),
         run_id=value.get("run_id"),
@@ -35,7 +32,7 @@ def _lineage(value: Any, default: SourceLineage | None) -> SourceLineage | None:
         metadata=value.get("metadata", {}),
     )
     if not lineage.is_valid():
-        raise AdapterError("lineage contains invalid field types or values")
+        return value
     return lineage
 
 
@@ -71,8 +68,6 @@ def records_from_fixture(
             # Retain the malformed envelope itself as evidence.
             raw = dict(entry)
         subreddit_context = entry.get("subreddit_context")
-        if subreddit_context is not None and not isinstance(subreddit_context, str):
-            raise AdapterError("subreddit_context must be a string")
         records.append(
             RawRecord(
                 record_type,
