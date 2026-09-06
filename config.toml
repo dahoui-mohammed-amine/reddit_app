@@ -1,0 +1,22 @@
+# Safe default: fixture mode makes no network calls and consumes no provider units.
+# Change provider.name only after reviewing the printed plan and provider terms.
+[ingestion]
+subreddits = ["freelance", "smallbusiness", "SaaS"]
+database_path = "data/reddit.sqlite3"
+listing_limit = 100
+max_discovery_pages = 1
+refresh_interval_minutes = 360
+max_refresh_posts = 100
+
+[comments]
+# bounded or full. Full is always explicit and may be expensive for live providers.
+mode = "bounded"
+depth = 1
+limit = 20
+
+[provider]
+name = "fixture"
+fixture_path = "fixtures/sample.json"
+request_timeout_seconds = 30
+max_retries = 3
+min_request_interval_seconds = 0.25
