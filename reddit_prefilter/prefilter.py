@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from .models import Decision, PrefilterResult, RawRecord, SourceLineage
+from .models import Decision, PrefilterResult, RawRecord, SourceLineage, _lineage_to_dict
 
 # These are deliberately literal, high-signal markers. This node does not try
 # to infer relevance, sentiment, or spam semantics.
@@ -28,6 +28,7 @@ _REASON_ORDER = (
     "INVALID_SOURCE_LINEAGE",
     "MISSING_IDENTIFIER",
     "INVALID_IDENTIFIER",
+    "INVALID_CONTENT",
     "IDENTIFIER_CONFLICT",
     "MISSING_POST_RELATIONSHIP",
     "INVALID_POST_RELATIONSHIP",
@@ -51,6 +52,7 @@ _INCOMPLETE_REASONS = {
     "INVALID_SOURCE_LINEAGE",
     "MISSING_IDENTIFIER",
     "INVALID_IDENTIFIER",
+    "INVALID_CONTENT",
     "IDENTIFIER_CONFLICT",
     "MISSING_POST_RELATIONSHIP",
     "INVALID_POST_RELATIONSHIP",
@@ -221,6 +223,11 @@ def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, s
     raw_value = raw.get("subreddit")
     context_value = record.subreddit
     reasons: list[str] = []
+    if (
+        (raw_value is not None and not isinstance(raw_value, str))
+        or (context_value is not None and not isinstance(context_value, str))
+    ):
+        return None, "invalid", ("INVALID_SUBREDDIT",)
     if _present(raw_value) and _present(context_value):
         raw_subreddit = str(raw_value).strip().casefold().removeprefix("r/")
         context_subreddit = str(context_value).strip().casefold().removeprefix("r/")
@@ -236,12 +243,23 @@ def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, s
     return result, "raw" if _present(raw_value) else "adapter_context", tuple(reasons)
 
 
+def _content_fields(record_type: str) -> tuple[str, ...]:
+    if record_type == "post":
+        return ("title", "selftext", "body", "bodyText", "text")
+    return ("body", "bodyText", "text")
+
+
+def _invalid_content(raw: Mapping[str, Any], record_type: str) -> bool:
+    return any(
+        field in raw and raw[field] is not None and not isinstance(raw[field], str)
+        for field in _content_fields(record_type)
+    )
+
+
 def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool]:
     deleted_markers = [raw[key] for key in ("deleted", "is_deleted") if key in raw]
     removed_markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
-    content_fields = ("body", "bodyText", "selftext", "text")
-    if record_type == "post":
-        content_fields = ("title", *content_fields)
+    content_fields = _content_fields(record_type)
     deleted_content = [raw[key] for key in content_fields if key in raw]
     removed_content = [raw[key] for key in content_fields if key in raw]
 
@@ -280,7 +298,7 @@ def _normalized_content(raw: Mapping[str, Any], record_type: str) -> str:
     else:
         values = [_first_non_null(raw, ("body", "bodyText", "text"))]
     return " ".join(
-        " ".join(str(value).split())
+        " ".join(value.split())
         for value in values
         if value is not None
     ).strip()
@@ -344,7 +362,7 @@ class Prefilter:
             "rule_version": self.rule_version,
             "ordinal": ordinal,
             "raw_sha256": raw_sha256,
-            "lineage": lineage.to_dict() if isinstance(lineage, SourceLineage) else None,
+            "lineage": _lineage_to_dict(lineage),
         }
         structural: set[str] = set()
         record_type = getattr(record, "record_type", "unknown")
@@ -360,6 +378,8 @@ class Prefilter:
             structural.add("INVALID_SOURCE_LINEAGE")
         identity = _identity(raw, record_type)
         structural.update(identity.reasons)
+        if _invalid_content(raw, record_type):
+            structural.add("INVALID_CONTENT")
         metadata["identifier_source"] = identity.source
         metadata["identifier_candidates"] = [
             {"source": source, "id": candidate}
@@ -381,7 +401,8 @@ class Prefilter:
         structural.update(subreddit_reasons)
         if self._scope:
             if subreddit is None:
-                structural.add("SUBREDDIT_UNAVAILABLE")
+                if not subreddit_reasons:
+                    structural.add("SUBREDDIT_UNAVAILABLE")
             elif self._normalize_subreddit(subreddit) not in self._scope:
                 metadata["configured_subreddits"] = sorted(self._scope)
                 # Scope mismatch is a rejection, not an incomplete record.

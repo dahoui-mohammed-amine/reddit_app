@@ -438,6 +438,26 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(result.decisions[0].reason_codes, ("INVALID_SOURCE_LINEAGE",))
         self.assertEqual(result.to_dict(), before)
 
+    def test_malformed_lineage_is_preserved_in_evidence_identity(self) -> None:
+        first = RawRecord(
+            "post",
+            {"id": "post-malformed-lineage", "title": "Enough"},
+            {"provider": None},
+        )
+        second = RawRecord(
+            "post",
+            {"id": "post-malformed-lineage", "title": "Enough"},
+            {"provider": 0},
+        )
+
+        result = Prefilter().evaluate((first, second))
+        serialized = result.to_dict()
+
+        self.assertNotEqual(result.decisions[0].evidence_id, result.decisions[1].evidence_id)
+        self.assertEqual(serialized["records"][0]["lineage"], {"provider": None})
+        self.assertEqual(serialized["records"][1]["lineage"], {"provider": 0})
+        self.assertEqual(serialized["decisions"][0]["lineage"], {"provider": None})
+
     def test_text_content_detects_removed_markers_and_normalizes_whitespace(self) -> None:
         removed = RawRecord(
             "post",
@@ -505,6 +525,45 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decisions[1].reason_codes, ("REMOVED_CONTENT",))
         self.assertEqual(decisions[2].status, "accepted")
         self.assertEqual(decisions[2].reason_codes, ("ACCEPTED",))
+
+    def test_fixture_rejects_non_string_subreddit_context(self) -> None:
+        with self.assertRaises(AdapterError):
+            records_from_fixture(
+                {
+                    "records": [
+                        {
+                            "record_type": "post",
+                            "subreddit_context": ["freelance"],
+                            "raw": {"id": "post-invalid-context"},
+                        }
+                    ]
+                }
+            )
+
+    def test_direct_invalid_subreddit_context_is_incomplete(self) -> None:
+        record = RawRecord(
+            "post",
+            {"id": "post-direct-invalid-context", "title": "Enough"},
+            self.lineage,
+            ["freelance"],
+        )
+        decision = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
+            (record,)
+        ).decisions[0]
+
+        self.assertEqual(decision.status, "incomplete")
+        self.assertEqual(decision.reason_codes, ("INVALID_SUBREDDIT",))
+
+    def test_non_string_content_is_incomplete(self) -> None:
+        record = RawRecord(
+            "post",
+            {"id": "post-invalid-content", "title": []},
+            self.lineage,
+        )
+        decision = Prefilter().evaluate((record,)).decisions[0]
+
+        self.assertEqual(decision.status, "incomplete")
+        self.assertEqual(decision.reason_codes, ("INVALID_CONTENT",))
 
     def test_fixture_adapter_rejects_an_ambiguous_top_level_shape(self) -> None:
         with self.assertRaises(AdapterError):

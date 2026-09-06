@@ -70,12 +70,15 @@ def records_from_fixture(
         if not has_raw:
             # Retain the malformed envelope itself as evidence.
             raw = dict(entry)
+        subreddit_context = entry.get("subreddit_context")
+        if subreddit_context is not None and not isinstance(subreddit_context, str):
+            raise AdapterError("subreddit_context must be a string")
         records.append(
             RawRecord(
                 str(record_type) if record_type is not None else "unknown",
                 raw,
                 _lineage(entry.get("lineage"), default_lineage),
-                entry.get("subreddit_context"),
+                subreddit_context,
             )
         )
     return tuple(records)

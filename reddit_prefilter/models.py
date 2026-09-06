@@ -115,8 +115,12 @@ class SourceLineage:
         }
 
 
-def _lineage_to_dict(lineage: Any) -> dict[str, Any] | None:
-    return lineage.to_dict() if isinstance(lineage, SourceLineage) else None
+def _lineage_to_dict(lineage: Any) -> Any:
+    if lineage is None:
+        return None
+    if isinstance(lineage, SourceLineage):
+        return lineage.to_dict()
+    return _thaw(lineage)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +139,9 @@ class RawRecord:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw", _freeze(self.raw))
+        if self.lineage is not None and not isinstance(self.lineage, SourceLineage):
+            object.__setattr__(self, "lineage", _freeze(self.lineage))
+        object.__setattr__(self, "subreddit", _freeze(self.subreddit))
 
     @property
     def raw_sha256(self) -> str:
@@ -156,7 +163,7 @@ class RawRecord:
             "record_type": self.record_type,
             "raw": _thaw(self.raw),
             "lineage": _lineage_to_dict(self.lineage),
-            "subreddit_context": self.subreddit,
+            "subreddit_context": _thaw(self.subreddit),
             "raw_sha256": self.raw_sha256,
             "evidence_id": self.evidence_id,
         }
