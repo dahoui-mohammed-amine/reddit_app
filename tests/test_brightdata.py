@@ -86,6 +86,21 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(first.request_records[0].metadata["accounting"]["returned_records"], 1)
         self.assertEqual(client.retries, 0)  # Bright Data never replays collection requests
 
+    def test_empty_discovery_rejects_bounded_comments_mode(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            page = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+        self.assertEqual(page.posts, [])
+        self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "unsupported" for gap in page.gaps))
+        self.assertFalse(page.metadata["comments_expanded"])
+        self.assertTrue(page.metadata["request_failed"])
+        self.assertTrue(page.metadata["checkpoint_deferred"])
+
     def test_discovery_rejects_duplicate_post_ids_across_subreddits(self) -> None:
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):

@@ -1470,8 +1470,27 @@ class BrightDataProvider(HttpProviderBase):
                 gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail="provider returned a discovery record that could not be attributed to a requested subreddit"))
             if key in duplicate_subreddits:
                 gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail="provider returned duplicate post identity across discovery inputs"))
+            bounded_comments_empty = (
+                config.comments_mode == "bounded"
+                and not posts
+                and error is None
+                and not deferred_202
+                and snapshot_id is None
+                and malformed_shape is None
+                and not errors
+                and returned_count == 0
+            )
+            if bounded_comments_empty:
+                gaps.append(
+                    Gap(
+                        "comment",
+                        "unsupported",
+                        subreddit=subreddit,
+                        detail="Bright Data bounded comments are unsupported: documented comment records expose no depth and days_back is not a count cap.",
+                    )
+                )
             gaps.extend(self._provider_gap("listing", entity_id=None, subreddit=subreddit, error=item) for item in target_errors)
-            request_failed = error is not None or bool(raw_items and any(gap.entity_type == "post" for gap in parse_gaps)) or bool(target_errors) or any(gap.entity_type == "listing" and gap.reason in {"provider_error", "unavailable", "unsupported"} for gap in gaps)
+            request_failed = error is not None or bool(raw_items and any(gap.entity_type == "post" for gap in parse_gaps)) or bool(target_errors) or bounded_comments_empty or any(gap.entity_type == "listing" and gap.reason in {"provider_error", "unavailable", "unsupported"} for gap in gaps)
             metadata = {
                 "dataset_id": self.posts_dataset_id,
                 "fetched_at": fetched_at,
