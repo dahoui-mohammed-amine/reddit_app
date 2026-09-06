@@ -544,6 +544,23 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(serialized["records"][1]["lineage"], {"provider": 0})
         self.assertEqual(serialized["decisions"][0]["lineage"], {"provider": None})
 
+    def test_surrogate_content_keeps_evidence_hashes_nonempty(self) -> None:
+        record = RawRecord(
+            "post",
+            {"id": "post-surrogate", "title": "Visible \ud800 content"},
+            self.lineage,
+        )
+
+        result = Prefilter().evaluate((record,))
+        decision = result.decisions[0]
+
+        self.assertEqual(decision.status, "accepted")
+        self.assertEqual(len(record.raw_sha256), 64)
+        self.assertEqual(len(decision.raw_sha256), 64)
+        self.assertEqual(len(record.evidence_id), 64)
+        self.assertEqual(len(decision.evidence_id), 64)
+        json.dumps(result.to_dict(), sort_keys=True)
+
     def test_text_content_detects_removed_markers_and_normalizes_whitespace(self) -> None:
         removed = RawRecord(
             "post",
@@ -639,6 +656,59 @@ class PrefilterTests(unittest.TestCase):
 
         self.assertEqual(decision.status, "incomplete")
         self.assertEqual(decision.reason_codes, ("INVALID_SUBREDDIT",))
+
+    def test_empty_raw_subreddit_does_not_fall_back_to_context(self) -> None:
+        records = tuple(
+            RawRecord(
+                "post",
+                {
+                    "id": f"post-empty-subreddit-{index}",
+                    "subreddit": value,
+                    "title": "A visible post with enough text",
+                },
+                self.lineage,
+                "freelance",
+            )
+            for index, value in enumerate(("", "   "))
+        )
+
+        decisions = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
+            records
+        ).decisions
+
+        self.assertEqual([decision.status for decision in decisions], ["incomplete", "incomplete"])
+        self.assertEqual(
+            [decision.reason_codes for decision in decisions],
+            [("INVALID_SUBREDDIT",), ("INVALID_SUBREDDIT",)],
+        )
+
+    def test_malformed_content_state_is_incomplete(self) -> None:
+        deleted = RawRecord(
+            "post",
+            {
+                "id": "post-malformed-deleted-state",
+                "deleted": [],
+                "title": "A visible post with enough text",
+            },
+            self.lineage,
+        )
+        removed = RawRecord(
+            "post",
+            {
+                "id": "post-malformed-removed-state",
+                "removed": {},
+                "title": "A visible post with enough text",
+            },
+            self.lineage,
+        )
+
+        decisions = Prefilter().evaluate((deleted, removed)).decisions
+
+        self.assertEqual([decision.status for decision in decisions], ["incomplete", "incomplete"])
+        self.assertEqual(
+            [decision.reason_codes for decision in decisions],
+            [("INVALID_CONTENT_STATE",), ("INVALID_CONTENT_STATE",)],
+        )
 
     def test_non_string_content_is_incomplete(self) -> None:
         record = RawRecord(

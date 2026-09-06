@@ -28,6 +28,7 @@ _REASON_ORDER = (
     "MISSING_IDENTIFIER",
     "INVALID_IDENTIFIER",
     "INVALID_CONTENT",
+    "INVALID_CONTENT_STATE",
     "IDENTIFIER_CONFLICT",
     "MISSING_POST_RELATIONSHIP",
     "INVALID_POST_RELATIONSHIP",
@@ -52,6 +53,7 @@ _INCOMPLETE_REASONS = {
     "MISSING_IDENTIFIER",
     "INVALID_IDENTIFIER",
     "INVALID_CONTENT",
+    "INVALID_CONTENT_STATE",
     "IDENTIFIER_CONFLICT",
     "MISSING_POST_RELATIONSHIP",
     "INVALID_POST_RELATIONSHIP",
@@ -225,25 +227,28 @@ def _canonical_parent_id(value: Any) -> str | None:
 def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, str, tuple[str, ...]]:
     raw_value = raw.get("subreddit")
     context_value = record.subreddit
+    raw_supplied = "subreddit" in raw and raw_value is not None
     reasons: list[str] = []
     if (
         (raw_value is not None and not isinstance(raw_value, str))
         or (context_value is not None and not isinstance(context_value, str))
     ):
         return None, "invalid", ("INVALID_SUBREDDIT",)
+    if raw_supplied and not _present(raw_value):
+        return None, "invalid", ("INVALID_SUBREDDIT",)
     if _present(raw_value) and _present(context_value):
         raw_subreddit = str(raw_value).strip().casefold().removeprefix("r/")
         context_subreddit = str(context_value).strip().casefold().removeprefix("r/")
         if raw_subreddit != context_subreddit:
             reasons.append("SUBREDDIT_CONFLICT")
-    value = raw_value if _present(raw_value) else context_value
+    value = raw_value if raw_supplied else context_value
     if not _present(value):
         return None, "unavailable", tuple(reasons)
     result = str(value).strip().removeprefix("r/")
     if not result or any(char.isspace() for char in result):
         reasons.append("INVALID_SUBREDDIT")
         return None, "invalid", tuple(reasons)
-    return result, "raw" if _present(raw_value) else "adapter_context", tuple(reasons)
+    return result, "raw" if raw_supplied else "adapter_context", tuple(reasons)
 
 
 def _content_fields(record_type: str) -> tuple[str, ...]:
@@ -259,9 +264,15 @@ def _invalid_content(raw: Mapping[str, Any], record_type: str) -> bool:
     )
 
 
-def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool]:
+def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool, bool]:
     deleted_markers = [raw[key] for key in ("deleted", "is_deleted") if key in raw]
     removed_markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
+    state_values = deleted_markers + removed_markers
+    if any(
+        value is not None and not isinstance(value, (bool, int, float, str))
+        for value in state_values
+    ):
+        return False, False, True
     content_fields = _content_fields(record_type)
     deleted_content = [raw[key] for key in content_fields if key in raw]
     removed_content = [raw[key] for key in content_fields if key in raw]
@@ -292,7 +303,7 @@ def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool
     # provider uses a category string rather than a boolean marker.
     if any(flagged(raw.get(key)) for key in ("removed_by_category",)):
         removed = True
-    return deleted, removed
+    return deleted, removed, False
 
 
 def _normalized_content(raw: Mapping[str, Any], record_type: str) -> str:
@@ -383,6 +394,10 @@ class Prefilter:
         structural.update(identity.reasons)
         if _invalid_content(raw, record_type):
             structural.add("INVALID_CONTENT")
+        deleted, removed, invalid_content_state = _content_state(raw, record_type)
+        if invalid_content_state:
+            structural.add("INVALID_CONTENT_STATE")
+        metadata["content_state"] = {"deleted": deleted, "removed": removed}
         metadata["identifier_source"] = identity.source
         metadata["identifier_candidates"] = [
             {"source": source, "id": candidate}
@@ -441,8 +456,6 @@ class Prefilter:
         reasons: set[str] = set()
         if duplicate_of is not None:
             reasons.add("DUPLICATE_RECORD")
-        deleted, removed = _content_state(raw, record_type)
-        metadata["content_state"] = {"deleted": deleted, "removed": removed}
         if deleted:
             reasons.add("DELETED_CONTENT")
         if removed:
@@ -501,14 +514,8 @@ class Prefilter:
 
     @staticmethod
     def _raw_sha256(record: RawRecord) -> str:
-        try:
-            return record.raw_sha256
-        except (TypeError, ValueError):
-            return ""
+        return record.raw_sha256
 
     @staticmethod
     def _evidence_id(record: RawRecord) -> str:
-        try:
-            return record.evidence_id
-        except (TypeError, ValueError):
-            return ""
+        return record.evidence_id

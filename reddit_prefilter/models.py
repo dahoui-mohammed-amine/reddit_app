@@ -24,7 +24,7 @@ def canonical_json(value: Any) -> str:
     return json.dumps(
         value,
         default=_json_default,
-        ensure_ascii=False,
+        ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
     )
