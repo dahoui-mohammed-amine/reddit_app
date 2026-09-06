@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-import re
 from typing import Any
 
-from .models import Decision, PrefilterResult, RawRecord, SourceLineage, _lineage_to_dict
+from .models import (
+    Decision,
+    PrefilterResult,
+    RawRecord,
+    SourceLineage,
+    _lineage_to_dict,
+)
 
 # These are deliberately literal, high-signal markers. This node does not try
 # to infer relevance, sentiment, or spam semantics.
@@ -91,7 +97,7 @@ class PrefilterConfig:
 
     def __post_init__(self) -> None:
         if isinstance(self.subreddit_scope, str) or isinstance(self.spam_markers, str):
-            raise ValueError("subreddit_scope and spam_markers must be sequences")
+            raise ValueError("subreddit_scope and spam_markers must be sequences")  # noqa: TRY004
         subreddit_scope = tuple(self.subreddit_scope)
         spam_markers = tuple(self.spam_markers)
         if (
@@ -101,7 +107,9 @@ class PrefilterConfig:
         ):
             raise ValueError("minimum_text_length must be a non-negative integer")
         if any(
-            not isinstance(item, str) or not item.strip() or not item.strip().casefold().removeprefix("r/")
+            not isinstance(item, str)
+            or not item.strip()
+            or not item.strip().casefold().removeprefix("r/")
             for item in subreddit_scope
         ):
             raise ValueError("subreddit_scope must contain non-empty subreddit names")
@@ -153,10 +161,20 @@ def _canonical_id(value: Any, prefix: str) -> str | None:
 
 def _identity(raw: Mapping[str, Any], record_type: str) -> _Identity:
     if record_type == "post":
-        fields = (("id", "id"), ("post_id", "post_id"), ("fullname", "fullname"), ("name", "name"))
+        fields = (
+            ("id", "id"),
+            ("post_id", "post_id"),
+            ("fullname", "fullname"),
+            ("name", "name"),
+        )
         prefix = "t3_"
     else:
-        fields = (("id", "id"), ("comment_id", "comment_id"), ("fullname", "fullname"), ("name", "name"))
+        fields = (
+            ("id", "id"),
+            ("comment_id", "comment_id"),
+            ("fullname", "fullname"),
+            ("name", "name"),
+        )
         prefix = "t1_"
 
     candidates: list[tuple[str, str | None]] = []
@@ -171,7 +189,9 @@ def _identity(raw: Mapping[str, Any], record_type: str) -> _Identity:
     reasons: list[str] = []
     valid_ids = [candidate for _, candidate in candidates if candidate is not None]
     record_id = valid_ids[0] if valid_ids else None
-    source = next((source for source, candidate in candidates if candidate is not None), None)
+    source = next(
+        (source for source, candidate in candidates if candidate is not None), None
+    )
     if not candidates:
         reasons.append("MISSING_IDENTIFIER")
     if invalid:
@@ -219,7 +239,7 @@ def _canonical_parent_id(value: Any) -> str | None:
         return None
     candidate = str(value).strip()
     if _QUALIFIED_ID_RE.match(candidate):
-        if not (candidate.startswith("t1_") or candidate.startswith("t3_")):
+        if not candidate.startswith(("t1_", "t3_")):
             return None
         suffix = candidate[3:]
         return candidate if suffix and _IDENTIFIER_RE.fullmatch(suffix) else None
@@ -231,14 +251,15 @@ def _strip_subreddit_prefix(value: str) -> str:
     return result[2:] if result.casefold().startswith("r/") else result
 
 
-def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, str, tuple[str, ...]]:
+def _subreddit(
+    record: RawRecord, raw: Mapping[str, Any]
+) -> tuple[str | None, str, tuple[str, ...]]:
     raw_value = raw.get("subreddit")
     context_value = record.subreddit
     raw_supplied = "subreddit" in raw and raw_value is not None
     reasons: list[str] = []
-    if (
-        (raw_value is not None and not isinstance(raw_value, str))
-        or (context_value is not None and not isinstance(context_value, str))
+    if (raw_value is not None and not isinstance(raw_value, str)) or (
+        context_value is not None and not isinstance(context_value, str)
     ):
         return None, "invalid", ("INVALID_SUBREDDIT",)
     if raw_supplied and not _present(raw_value):
@@ -291,7 +312,11 @@ def _valid_state_value(value: Any, *, category: bool = False) -> bool:
 
 def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool, bool]:
     deleted_markers = [raw[key] for key in ("deleted", "is_deleted") if key in raw]
-    removed_markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
+    removed_markers = [
+        raw[key]
+        for key in ("removed", "is_removed", "removed_by_category")
+        if key in raw
+    ]
     if any(
         not _valid_state_value(raw[key])
         for key in ("deleted", "is_deleted", "removed", "is_removed")
@@ -337,13 +362,14 @@ def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool
 
 def _normalized_content(raw: Mapping[str, Any], record_type: str) -> str:
     if record_type == "post":
-        values = [raw.get("title"), _first_non_null(raw, ("selftext", "body", "bodyText", "text"))]
+        values = [
+            raw.get("title"),
+            _first_non_null(raw, ("selftext", "body", "bodyText", "text")),
+        ]
     else:
         values = [_first_non_null(raw, ("body", "bodyText", "text"))]
     return " ".join(
-        " ".join(value.split())
-        for value in values
-        if value is not None
+        " ".join(value.split()) for value in values if value is not None
     ).strip()
 
 
@@ -358,7 +384,12 @@ def _marker_matches(text: str, markers: Sequence[str]) -> tuple[str, ...]:
 
 
 def _ordered_reasons(reasons: set[str] | Sequence[str]) -> tuple[str, ...]:
-    return tuple(sorted(set(reasons), key=lambda reason: (_REASON_INDEX.get(reason, len(_REASON_ORDER)), reason)))
+    return tuple(
+        sorted(
+            set(reasons),
+            key=lambda reason: (_REASON_INDEX.get(reason, len(_REASON_ORDER)), reason),
+        )
+    )
 
 
 class Prefilter:
@@ -368,7 +399,9 @@ class Prefilter:
 
     def __init__(self, config: PrefilterConfig | None = None):
         self.config = config or PrefilterConfig()
-        self._scope = frozenset(self._normalize_subreddit(item) for item in self.config.subreddit_scope)
+        self._scope = frozenset(
+            self._normalize_subreddit(item) for item in self.config.subreddit_scope
+        )
 
     @staticmethod
     def _normalize_subreddit(value: str) -> str:
@@ -386,7 +419,9 @@ class Prefilter:
         decisions: list[Decision] = []
         first_by_identity: dict[tuple[str, str], str] = {}
         for ordinal, record in enumerate(materialized):
-            decision, identity_key = self._evaluate_one(record, ordinal, first_by_identity)
+            decision, identity_key = self._evaluate_one(
+                record, ordinal, first_by_identity
+            )
             if identity_key is not None and identity_key not in first_by_identity:
                 first_by_identity[identity_key] = decision.evidence_id
             decisions.append(decision)
@@ -411,10 +446,18 @@ class Prefilter:
         record_type = getattr(record, "record_type", "unknown")
         raw = getattr(record, "raw", None)
 
-        if not isinstance(record_type, str) or record_type not in {"post", "comment"} or not isinstance(raw, Mapping):
+        if (
+            not isinstance(record_type, str)
+            or record_type not in {"post", "comment"}
+            or not isinstance(raw, Mapping)
+        ):
             structural.add("MALFORMED_RECORD")
-            metadata["malformed"] = "record_type must be post/comment and raw must be an object"
-            return self._decision(record, evidence_id, raw_sha256, None, structural, lineage, metadata), None
+            metadata["malformed"] = (
+                "record_type must be post/comment and raw must be an object"
+            )
+            return self._decision(
+                record, evidence_id, raw_sha256, None, structural, lineage, metadata
+            ), None
         if lineage is None:
             structural.add("MISSING_SOURCE_LINEAGE")
         elif not isinstance(lineage, SourceLineage) or not lineage.is_valid():
@@ -457,8 +500,14 @@ class Prefilter:
             else:
                 metadata["scope_match"] = True
 
-        identity_key = (record_type, identity.record_id) if identity.record_id is not None else None
-        duplicate_of = first_by_identity.get(identity_key) if identity_key is not None else None
+        identity_key = (
+            (record_type, identity.record_id)
+            if identity.record_id is not None
+            else None
+        )
+        duplicate_of = (
+            first_by_identity.get(identity_key) if identity_key is not None else None
+        )
         if duplicate_of is not None:
             metadata["duplicate_of"] = duplicate_of
 
@@ -489,7 +538,10 @@ class Prefilter:
             reasons.add("DELETED_CONTENT")
         if removed:
             reasons.add("REMOVED_CONTENT")
-        if self._scope and self._normalize_subreddit(subreddit or "") not in self._scope:
+        if (
+            self._scope
+            and self._normalize_subreddit(subreddit or "") not in self._scope
+        ):
             reasons.add("OUT_OF_SCOPE")
             metadata["configured_subreddits"] = sorted(self._scope)
             metadata["scope_match"] = False
@@ -498,7 +550,11 @@ class Prefilter:
         text_length = len(content)
         metadata["text_length"] = text_length
         metadata["minimum_text_length"] = self.config.minimum_text_length
-        if not deleted and not removed and text_length < self.config.minimum_text_length:
+        if (
+            not deleted
+            and not removed
+            and text_length < self.config.minimum_text_length
+        ):
             reasons.add("TEXT_TOO_SHORT")
 
         matches = _marker_matches(content, self.config.spam_markers)
@@ -539,7 +595,16 @@ class Prefilter:
         else:
             status = "accepted"
         metadata["decision_reason_codes"] = list(ordered)
-        return Decision(evidence_id, raw_sha256, record.record_type, record_id, status, ordered, lineage, metadata)
+        return Decision(
+            evidence_id,
+            raw_sha256,
+            record.record_type,
+            record_id,
+            status,
+            ordered,
+            lineage,
+            metadata,
+        )
 
     @staticmethod
     def _raw_sha256(record: RawRecord) -> str:

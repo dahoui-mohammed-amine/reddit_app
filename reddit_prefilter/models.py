@@ -31,7 +31,9 @@ def _canonicalize(value: Any) -> Any:
             }
             for key, item in value.items()
         ]
-        entries.sort(key=lambda entry: (entry["key_type"], _canonical_dump(entry["key"])))
+        entries.sort(
+            key=lambda entry: (entry["key_type"], _canonical_dump(entry["key"]))
+        )
         return {"__canonical_type__": "mapping", "entries": entries}
     if isinstance(value, (list, tuple)):
         return [_canonicalize(item) for item in value]
@@ -86,7 +88,9 @@ def _thaw(value: Any) -> Any:
             }
             for key, item in value.items()
         ]
-        entries.sort(key=lambda entry: (entry["key_type"], _canonical_dump(entry["key"])))
+        entries.sort(
+            key=lambda entry: (entry["key_type"], _canonical_dump(entry["key"]))
+        )
         return ["mapping", entries]
     if isinstance(value, tuple):
         return [_thaw(item) for item in value]

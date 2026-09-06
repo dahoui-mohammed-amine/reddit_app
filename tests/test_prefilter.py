@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from reddit_prefilter import Prefilter, PrefilterConfig, RawRecord, SourceLineage
 from reddit_prefilter.adapter import AdapterError, load_fixture, records_from_fixture
-
 
 ROOT = Path(__file__).parents[1]
 FIXTURE = ROOT / "fixtures" / "prefilter_records.json"
@@ -41,10 +40,14 @@ class PrefilterTests(unittest.TestCase):
         comment = self.by_id["comment-accepted"]
         self.assertEqual(comment.status, "accepted")
         self.assertEqual(comment.metadata["relationship"]["post_id"], "post-accepted")
-        self.assertEqual(comment.metadata["relationship"]["parent_id"], "t3_post-accepted")
+        self.assertEqual(
+            comment.metadata["relationship"]["parent_id"], "t3_post-accepted"
+        )
         self.assertEqual(comment.metadata["subreddit_source"], "adapter_context")
 
-    def test_deleted_and_removed_content_is_rejected_without_erasing_evidence(self) -> None:
+    def test_deleted_and_removed_content_is_rejected_without_erasing_evidence(
+        self,
+    ) -> None:
         deleted = self.by_id["post-deleted"]
         removed = self.by_id["comment-removed"]
         self.assertEqual(deleted.status, "rejected")
@@ -55,10 +58,14 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(self.records[3].raw["body"], "[removed]")
 
     def test_duplicate_is_rejected_and_points_to_first_evidence(self) -> None:
-        decisions = [item for item in self.result.decisions if item.record_id == "post-accepted"]
+        decisions = [
+            item for item in self.result.decisions if item.record_id == "post-accepted"
+        ]
         self.assertEqual([item.status for item in decisions], ["accepted", "rejected"])
         self.assertEqual(decisions[1].reason_codes, ("DUPLICATE_RECORD",))
-        self.assertEqual(decisions[1].metadata["duplicate_of"], decisions[0].evidence_id)
+        self.assertEqual(
+            decisions[1].metadata["duplicate_of"], decisions[0].evidence_id
+        )
         self.assertEqual(len(self.result.records), len(self.result.decisions))
 
     def test_minimum_text_length_and_spam_marker_are_rejected(self) -> None:
@@ -67,7 +74,10 @@ class PrefilterTests(unittest.TestCase):
         spam = self.by_id["comment-spam"]
         self.assertEqual(spam.status, "rejected")
         self.assertEqual(spam.reason_codes, ("SPAM_MARKER",))
-        self.assertEqual(spam.metadata["matched_spam_markers"], ("buy now", "click here", "free money"))
+        self.assertEqual(
+            spam.metadata["matched_spam_markers"],
+            ("buy now", "click here", "free money"),
+        )
 
     def test_scope_is_rejected_but_unavailable_scope_is_incomplete(self) -> None:
         outside = self.by_id["post-outside"]
@@ -83,9 +93,17 @@ class PrefilterTests(unittest.TestCase):
             for item in self.result.decisions
             if item.record_id is None and "MISSING_IDENTIFIER" in item.reason_codes
         )
-        invalid = next(item for item in self.result.decisions if "INVALID_IDENTIFIER" in item.reason_codes)
+        invalid = next(
+            item
+            for item in self.result.decisions
+            if "INVALID_IDENTIFIER" in item.reason_codes
+        )
         no_link = self.by_id["comment-no-link"]
-        malformed = next(item for item in self.result.decisions if "MALFORMED_RECORD" in item.reason_codes)
+        malformed = next(
+            item
+            for item in self.result.decisions
+            if "MALFORMED_RECORD" in item.reason_codes
+        )
         self.assertEqual(missing.status, "incomplete")
         self.assertEqual(missing.reason_codes, ("MISSING_IDENTIFIER",))
         self.assertEqual(invalid.status, "incomplete")
@@ -102,8 +120,12 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decision.metadata["rule_version"], "reddit-prefilter-v1")
         self.assertEqual(decision.metadata["raw_sha256"], self.records[0].raw_sha256)
         serialized = self.result.to_dict()
-        self.assertEqual(serialized["records"][0]["raw"]["title"], "Pricing a small project")
-        self.assertEqual(serialized["decisions"][0]["evidence_id"], decision.evidence_id)
+        self.assertEqual(
+            serialized["records"][0]["raw"]["title"], "Pricing a small project"
+        )
+        self.assertEqual(
+            serialized["decisions"][0]["evidence_id"], decision.evidence_id
+        )
 
     def test_repeated_runs_are_idempotent_and_do_not_mutate_raw_input(self) -> None:
         before = json.dumps(self.result.to_dict(), sort_keys=True)
@@ -156,7 +178,11 @@ class PrefilterTests(unittest.TestCase):
             },
             self.lineage,
         )
-        decisions = Prefilter(PrefilterConfig()).evaluate((conflict, invalid_subreddit)).decisions
+        decisions = (
+            Prefilter(PrefilterConfig())
+            .evaluate((conflict, invalid_subreddit))
+            .decisions
+        )
         self.assertEqual(decisions[0].status, "incomplete")
         self.assertEqual(
             decisions[0].reason_codes,
@@ -188,15 +214,19 @@ class PrefilterTests(unittest.TestCase):
             self.lineage,
             "freelance",
         )
-        decisions = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
-            (invalid_parent, conflict)
-        ).decisions
+        decisions = (
+            Prefilter(PrefilterConfig(subreddit_scope=("freelance",)))
+            .evaluate((invalid_parent, conflict))
+            .decisions
+        )
         self.assertEqual(decisions[0].status, "incomplete")
         self.assertEqual(decisions[0].reason_codes, ("INVALID_PARENT_ID",))
         self.assertEqual(decisions[1].status, "incomplete")
         self.assertEqual(decisions[1].reason_codes, ("RELATIONSHIP_CONFLICT",))
 
-    def test_missing_and_invalid_lineage_are_incomplete_and_scope_is_optional(self) -> None:
+    def test_missing_and_invalid_lineage_are_incomplete_and_scope_is_optional(
+        self,
+    ) -> None:
         record = RawRecord(
             "post",
             {"id": "post-no-lineage", "title": "A post with enough text"},
@@ -210,13 +240,25 @@ class PrefilterTests(unittest.TestCase):
             {"id": "post-invalid-lineage", "title": "A post with enough text"},
             SourceLineage(provider="", observed_at=""),
         )
-        invalid_decision = Prefilter(PrefilterConfig()).evaluate((invalid_lineage,)).decisions[0]
+        invalid_decision = (
+            Prefilter(PrefilterConfig()).evaluate((invalid_lineage,)).decisions[0]
+        )
         self.assertEqual(invalid_decision.status, "incomplete")
         self.assertEqual(invalid_decision.reason_codes, ("INVALID_SOURCE_LINEAGE",))
 
-        no_scope = Prefilter(PrefilterConfig(minimum_text_length=1)).evaluate(
-            (RawRecord("post", {"id": "post-no-scope-check", "title": "Enough text"}, self.lineage),)
-        ).decisions[0]
+        no_scope = (
+            Prefilter(PrefilterConfig(minimum_text_length=1))
+            .evaluate(
+                (
+                    RawRecord(
+                        "post",
+                        {"id": "post-no-scope-check", "title": "Enough text"},
+                        self.lineage,
+                    ),
+                )
+            )
+            .decisions[0]
+        )
         self.assertEqual(no_scope.status, "accepted")
 
     def test_invalid_lineage_is_auditable_and_raw_evidence_is_snapshotted(self) -> None:
@@ -249,7 +291,11 @@ class PrefilterTests(unittest.TestCase):
             metadata=metadata,
         )
         result = Prefilter().evaluate(
-            (RawRecord("post", {"id": "post-lineage-snapshot", "title": "Enough"}, lineage),)
+            (
+                RawRecord(
+                    "post", {"id": "post-lineage-snapshot", "title": "Enough"}, lineage
+                ),
+            )
         )
         before = result.to_dict()
 
@@ -288,7 +334,9 @@ class PrefilterTests(unittest.TestCase):
             "freelance",
         )
 
-        decisions = Prefilter().evaluate((post, comment_relationship, comment_parent)).decisions
+        decisions = (
+            Prefilter().evaluate((post, comment_relationship, comment_parent)).decisions
+        )
 
         self.assertEqual(decisions[0].status, "incomplete")
         self.assertEqual(decisions[0].reason_codes, ("INVALID_IDENTIFIER",))
@@ -353,7 +401,9 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decisions[0].reason_codes, ("SPAM_MARKER",))
         self.assertEqual(decisions[1].reason_codes, ("SPAM_MARKER",))
 
-    def test_identifier_conflict_remains_incomplete_with_duplicate_evidence(self) -> None:
+    def test_identifier_conflict_remains_incomplete_with_duplicate_evidence(
+        self,
+    ) -> None:
         first = RawRecord(
             "post",
             {"id": "post-duplicate-conflict", "title": "A canonical post"},
@@ -376,7 +426,9 @@ class PrefilterTests(unittest.TestCase):
             decisions[1].reason_codes,
             ("IDENTIFIER_CONFLICT", "DUPLICATE_RECORD"),
         )
-        self.assertEqual(decisions[1].metadata["duplicate_of"], decisions[0].evidence_id)
+        self.assertEqual(
+            decisions[1].metadata["duplicate_of"], decisions[0].evidence_id
+        )
 
     def test_empty_identifier_aliases_are_invalid_when_supplied(self) -> None:
         post = RawRecord(
@@ -415,7 +467,9 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decisions[1].reason_codes, ("INVALID_POST_RELATIONSHIP",))
         self.assertEqual(decisions[2].reason_codes, ("INVALID_PARENT_ID",))
 
-    def test_removed_compatibility_aliases_and_community_fallback_are_not_public(self) -> None:
+    def test_removed_compatibility_aliases_and_community_fallback_are_not_public(
+        self,
+    ) -> None:
         config = PrefilterConfig()
         self.assertFalse(hasattr(config, "min_text_length"))
         self.assertFalse(hasattr(config, "subreddits"))
@@ -429,9 +483,11 @@ class PrefilterTests(unittest.TestCase):
             },
             self.lineage,
         )
-        decision = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
-            (record,)
-        ).decisions[0]
+        decision = (
+            Prefilter(PrefilterConfig(subreddit_scope=("freelance",)))
+            .evaluate((record,))
+            .decisions[0]
+        )
         self.assertEqual(decision.status, "incomplete")
         self.assertEqual(decision.reason_codes, ("SUBREDDIT_UNAVAILABLE",))
 
@@ -455,13 +511,17 @@ class PrefilterTests(unittest.TestCase):
                 ]
             }
         )
-        decision = Prefilter(
-            PrefilterConfig(
-                minimum_text_length=1,
-                subreddit_scope=("saas",),
-                spam_markers=("ordinary",),
+        decision = (
+            Prefilter(
+                PrefilterConfig(
+                    minimum_text_length=1,
+                    subreddit_scope=("saas",),
+                    spam_markers=("ordinary",),
+                )
             )
-        ).evaluate(record).decisions[0]
+            .evaluate(record)
+            .decisions[0]
+        )
         self.assertEqual(decision.status, "rejected")
         self.assertEqual(decision.reason_codes, ("SPAM_MARKER",))
         self.assertTrue(decision.metadata["scope_match"])
@@ -520,7 +580,13 @@ class PrefilterTests(unittest.TestCase):
             source_url=source_url,
         )
         result = Prefilter().evaluate(
-            (RawRecord("post", {"id": "post-invalid-source-url", "title": "Enough"}, lineage),)
+            (
+                RawRecord(
+                    "post",
+                    {"id": "post-invalid-source-url", "title": "Enough"},
+                    lineage,
+                ),
+            )
         )
         before = result.to_dict()
 
@@ -545,7 +611,9 @@ class PrefilterTests(unittest.TestCase):
         result = Prefilter().evaluate((first, second))
         serialized = result.to_dict()
 
-        self.assertNotEqual(result.decisions[0].evidence_id, result.decisions[1].evidence_id)
+        self.assertNotEqual(
+            result.decisions[0].evidence_id, result.decisions[1].evidence_id
+        )
         self.assertEqual(serialized["records"][0]["lineage"], {"provider": None})
         self.assertEqual(serialized["records"][1]["lineage"], {"provider": 0})
         self.assertEqual(serialized["decisions"][0]["lineage"], {"provider": None})
@@ -553,7 +621,12 @@ class PrefilterTests(unittest.TestCase):
     def test_non_string_mapping_keys_remain_distinct_evidence(self) -> None:
         mixed_raw = RawRecord(
             "post",
-            {1: "numeric key", "1": "string key", "id": "post-mixed-keys", "title": "Enough"},
+            {
+                1: "numeric key",
+                "1": "string key",
+                "id": "post-mixed-keys",
+                "title": "Enough",
+            },
             self.lineage,
         )
         string_raw = RawRecord(
@@ -568,10 +641,20 @@ class PrefilterTests(unittest.TestCase):
         )
 
         result = Prefilter().evaluate(
-            (mixed_raw, string_raw, RawRecord("post", {"id": "post-mixed-lineage", "title": "Enough"}, mixed_lineage))
+            (
+                mixed_raw,
+                string_raw,
+                RawRecord(
+                    "post",
+                    {"id": "post-mixed-lineage", "title": "Enough"},
+                    mixed_lineage,
+                ),
+            )
         )
 
-        self.assertNotEqual(result.decisions[0].evidence_id, result.decisions[1].evidence_id)
+        self.assertNotEqual(
+            result.decisions[0].evidence_id, result.decisions[1].evidence_id
+        )
         self.assertEqual(result.decisions[2].status, "accepted")
         self.assertEqual(len(result.decisions[2].evidence_id), 64)
         json.dumps(result.to_dict(), sort_keys=True)
@@ -580,11 +663,7 @@ class PrefilterTests(unittest.TestCase):
         mixed = RawRecord("post", {1: "v"}, self.lineage)
         literal = RawRecord(
             "post",
-            {
-                "__mapping__": [
-                    {"key_type": "builtins.int", "key": 1, "value": "v"}
-                ]
-            },
+            {"__mapping__": [{"key_type": "builtins.int", "key": 1, "value": "v"}]},
             self.lineage,
         )
 
@@ -607,7 +686,9 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(len(decision.evidence_id), 64)
         json.dumps(result.to_dict(), sort_keys=True)
 
-    def test_text_content_detects_removed_markers_and_normalizes_whitespace(self) -> None:
+    def test_text_content_detects_removed_markers_and_normalizes_whitespace(
+        self,
+    ) -> None:
         removed = RawRecord(
             "post",
             {"id": "post-removed-text", "text": "[removed]"},
@@ -630,9 +711,11 @@ class PrefilterTests(unittest.TestCase):
 
         removed_decision = Prefilter().evaluate((removed,)).decisions[0]
         marker_decision = Prefilter().evaluate((marker,)).decisions[0]
-        short_decision = Prefilter(PrefilterConfig(minimum_text_length=4)).evaluate(
-            (short,)
-        ).decisions[0]
+        short_decision = (
+            Prefilter(PrefilterConfig(minimum_text_length=4))
+            .evaluate((short,))
+            .decisions[0]
+        )
 
         self.assertEqual(removed_decision.status, "rejected")
         self.assertEqual(removed_decision.reason_codes, ("REMOVED_CONTENT",))
@@ -664,9 +747,11 @@ class PrefilterTests(unittest.TestCase):
             self.lineage,
         )
 
-        decisions = Prefilter().evaluate(
-            (deleted_title, removed_title, visible_comment)
-        ).decisions
+        decisions = (
+            Prefilter()
+            .evaluate((deleted_title, removed_title, visible_comment))
+            .decisions
+        )
 
         self.assertEqual(decisions[0].status, "rejected")
         self.assertEqual(decisions[0].reason_codes, ("DELETED_CONTENT",))
@@ -688,9 +773,11 @@ class PrefilterTests(unittest.TestCase):
             },
             default_lineage=self.lineage,
         )
-        decision = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
-            records
-        ).decisions[0]
+        decision = (
+            Prefilter(PrefilterConfig(subreddit_scope=("freelance",)))
+            .evaluate(records)
+            .decisions[0]
+        )
         self.assertEqual(decision.status, "incomplete")
         self.assertEqual(decision.reason_codes, ("INVALID_SUBREDDIT",))
 
@@ -701,9 +788,11 @@ class PrefilterTests(unittest.TestCase):
             self.lineage,
             ["freelance"],
         )
-        decision = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
-            (record,)
-        ).decisions[0]
+        decision = (
+            Prefilter(PrefilterConfig(subreddit_scope=("freelance",)))
+            .evaluate((record,))
+            .decisions[0]
+        )
 
         self.assertEqual(decision.status, "incomplete")
         self.assertEqual(decision.reason_codes, ("INVALID_SUBREDDIT",))
@@ -723,7 +812,10 @@ class PrefilterTests(unittest.TestCase):
             for index, value in enumerate(("", "   "))
         )
 
-        for config in (PrefilterConfig(), PrefilterConfig(subreddit_scope=("freelance",))):
+        for config in (
+            PrefilterConfig(),
+            PrefilterConfig(subreddit_scope=("freelance",)),
+        ):
             with self.subTest(config=config):
                 decisions = Prefilter(config).evaluate(records).decisions
 
@@ -740,17 +832,25 @@ class PrefilterTests(unittest.TestCase):
         records = tuple(
             RawRecord(
                 "post",
-                {"id": f"post-uppercase-empty-{index}", "subreddit": "R/", "title": "Enough"},
+                {
+                    "id": f"post-uppercase-empty-{index}",
+                    "subreddit": "R/",
+                    "title": "Enough",
+                },
                 self.lineage,
             )
             for index in range(2)
         )
 
-        decisions = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(
-            records
-        ).decisions
+        decisions = (
+            Prefilter(PrefilterConfig(subreddit_scope=("freelance",)))
+            .evaluate(records)
+            .decisions
+        )
 
-        self.assertEqual([decision.status for decision in decisions], ["incomplete", "incomplete"])
+        self.assertEqual(
+            [decision.status for decision in decisions], ["incomplete", "incomplete"]
+        )
         self.assertEqual(
             [decision.reason_codes for decision in decisions],
             [("INVALID_SUBREDDIT",), ("INVALID_SUBREDDIT",)],
@@ -767,7 +867,10 @@ class PrefilterTests(unittest.TestCase):
             for index, value in enumerate(("", " "))
         )
 
-        for config in (PrefilterConfig(), PrefilterConfig(subreddit_scope=("freelance",))):
+        for config in (
+            PrefilterConfig(),
+            PrefilterConfig(subreddit_scope=("freelance",)),
+        ):
             with self.subTest(config=config):
                 decisions = Prefilter(config).evaluate(records).decisions
 
@@ -837,13 +940,31 @@ class PrefilterTests(unittest.TestCase):
             self.lineage,
         )
 
-        decisions = Prefilter().evaluate(
-            (deleted, removed, corrupt_deleted, corrupt_removed, numeric_deleted, numeric_category)
-        ).decisions
+        decisions = (
+            Prefilter()
+            .evaluate(
+                (
+                    deleted,
+                    removed,
+                    corrupt_deleted,
+                    corrupt_removed,
+                    numeric_deleted,
+                    numeric_category,
+                )
+            )
+            .decisions
+        )
 
         self.assertEqual(
             [decision.status for decision in decisions],
-            ["incomplete", "incomplete", "incomplete", "incomplete", "incomplete", "incomplete"],
+            [
+                "incomplete",
+                "incomplete",
+                "incomplete",
+                "incomplete",
+                "incomplete",
+                "incomplete",
+            ],
         )
         self.assertEqual(
             [decision.reason_codes for decision in decisions],
@@ -871,7 +992,9 @@ class PrefilterTests(unittest.TestCase):
 
         self.assertEqual(result.decisions[0].status, "incomplete")
         self.assertEqual(result.decisions[0].reason_codes, ("INVALID_SOURCE_LINEAGE",))
-        self.assertEqual(result.to_dict()["records"][0]["lineage"]["source_batch"], "b1")
+        self.assertEqual(
+            result.to_dict()["records"][0]["lineage"]["source_batch"], "b1"
+        )
 
     def test_non_string_content_is_incomplete(self) -> None:
         record = RawRecord(
@@ -906,7 +1029,9 @@ class PrefilterTests(unittest.TestCase):
             self.lineage,
         )
 
-        decisions = Prefilter().evaluate((invalid_id, invalid_link, invalid_parent)).decisions
+        decisions = (
+            Prefilter().evaluate((invalid_id, invalid_link, invalid_parent)).decisions
+        )
 
         self.assertEqual(decisions[0].status, "incomplete")
         self.assertEqual(decisions[0].reason_codes, ("INVALID_IDENTIFIER",))
@@ -948,7 +1073,9 @@ class PrefilterTests(unittest.TestCase):
 
         self.assertEqual(records[0].record_type, 1)
         self.assertEqual(records[1].record_type, "1")
-        self.assertNotEqual(result.decisions[0].evidence_id, result.decisions[1].evidence_id)
+        self.assertNotEqual(
+            result.decisions[0].evidence_id, result.decisions[1].evidence_id
+        )
         self.assertEqual(result.decisions[0].reason_codes, ("MALFORMED_RECORD",))
         self.assertEqual(result.decisions[1].reason_codes, ("MALFORMED_RECORD",))
 
@@ -970,7 +1097,9 @@ class PrefilterTests(unittest.TestCase):
 
         self.assertEqual(serialized["records"][0]["record_type"], {"kind": "post"})
         self.assertEqual(serialized["decisions"][0]["record_type"], {"kind": "post"})
-        self.assertEqual(serialized["decisions"][0]["reason_codes"], ["MALFORMED_RECORD"])
+        self.assertEqual(
+            serialized["decisions"][0]["reason_codes"], ["MALFORMED_RECORD"]
+        )
         json.dumps(serialized, sort_keys=True)
 
     def test_sequence_configuration_options_reject_bare_strings(self) -> None:
@@ -1012,9 +1141,11 @@ class PrefilterTests(unittest.TestCase):
         )
 
         default_decision = Prefilter().evaluate((record,)).decisions[0]
-        configured_decision = Prefilter(
-            PrefilterConfig(spam_markers=("spam",))
-        ).evaluate((record,)).decisions[0]
+        configured_decision = (
+            Prefilter(PrefilterConfig(spam_markers=("spam",)))
+            .evaluate((record,))
+            .decisions[0]
+        )
 
         self.assertEqual(default_decision.status, "accepted")
         self.assertEqual(default_decision.reason_codes, ("ACCEPTED",))
