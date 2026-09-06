@@ -1,0 +1,21 @@
+[ingestion]
+subreddits = ["freelance", "smallbusiness", "SaaS"]
+database_path = "data/reddit.sqlite3"
+listing_limit = 100
+max_discovery_pages = 1
+refresh_interval_minutes = 360
+max_refresh_posts = 100
+refresh_expiry_days = 30
+
+[comments]
+mode = "bounded"
+depth = 1
+limit = 20
+
+[provider]
+# fixture, redditapis, or fetchlayer
+name = "fixture"
+fixture_path = "fixtures/sample.json"
+request_timeout_seconds = 30
+max_retries = 3
+min_request_interval_seconds = 0.25
