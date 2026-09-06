@@ -71,8 +71,8 @@ A record is `accepted`, `rejected`, or `incomplete`:
 Post text is title plus body; comment text is body. Whitespace is normalized
 before counting or matching. `minimum_text_length=0` disables that rule. An
 empty `subreddit_scope` disables scope checking. The default spam list is
-intentionally short and literal (`spam`, `buy now`, `free money`, `click here`,
-`promo code`, `crypto giveaway`, `telegram.me`, and `discord.gg/`).
+intentionally short and literal (`buy now`, `free money`, `click here`, `promo
+code`, `crypto giveaway`, `telegram.me`, and `discord.gg/`).
 
 ## Integration decision
 

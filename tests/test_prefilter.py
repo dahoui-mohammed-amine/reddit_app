@@ -565,6 +565,72 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(decision.status, "incomplete")
         self.assertEqual(decision.reason_codes, ("INVALID_CONTENT",))
 
+    def test_non_string_identifiers_and_relationships_are_incomplete(self) -> None:
+        invalid_id = RawRecord(
+            "post",
+            {"id": 123, "title": "Enough"},
+            self.lineage,
+        )
+        invalid_link = RawRecord(
+            "comment",
+            {"id": "comment-invalid-link", "link_id": 123, "body": "Enough"},
+            self.lineage,
+        )
+        invalid_parent = RawRecord(
+            "comment",
+            {
+                "id": "comment-invalid-parent",
+                "link_id": "post-parent",
+                "parent_id": 123,
+                "body": "Enough",
+            },
+            self.lineage,
+        )
+
+        decisions = Prefilter().evaluate((invalid_id, invalid_link, invalid_parent)).decisions
+
+        self.assertEqual(decisions[0].status, "incomplete")
+        self.assertEqual(decisions[0].reason_codes, ("INVALID_IDENTIFIER",))
+        self.assertEqual(decisions[1].status, "incomplete")
+        self.assertEqual(decisions[1].reason_codes, ("INVALID_POST_RELATIONSHIP",))
+        self.assertEqual(decisions[2].status, "incomplete")
+        self.assertEqual(decisions[2].reason_codes, ("INVALID_PARENT_ID",))
+
+    def test_malformed_record_type_is_incomplete(self) -> None:
+        record = RawRecord(
+            ["post"],
+            {"id": "post-malformed-type", "title": "Enough"},
+            self.lineage,
+        )
+
+        decision = Prefilter().evaluate((record,)).decisions[0]
+
+        self.assertEqual(decision.status, "incomplete")
+        self.assertEqual(decision.reason_codes, ("MALFORMED_RECORD",))
+
+    def test_sequence_configuration_options_reject_bare_strings(self) -> None:
+        with self.assertRaises(ValueError):
+            PrefilterConfig(subreddit_scope="freelance")
+        with self.assertRaises(ValueError):
+            PrefilterConfig(spam_markers="spam")
+
+    def test_default_spam_rules_remain_conservative_and_configurable(self) -> None:
+        record = RawRecord(
+            "post",
+            {"id": "post-mentions-spam", "title": "How do I report spam?"},
+            self.lineage,
+        )
+
+        default_decision = Prefilter().evaluate((record,)).decisions[0]
+        configured_decision = Prefilter(
+            PrefilterConfig(spam_markers=("spam",))
+        ).evaluate((record,)).decisions[0]
+
+        self.assertEqual(default_decision.status, "accepted")
+        self.assertEqual(default_decision.reason_codes, ("ACCEPTED",))
+        self.assertEqual(configured_decision.status, "rejected")
+        self.assertEqual(configured_decision.reason_codes, ("SPAM_MARKER",))
+
     def test_fixture_adapter_rejects_an_ambiguous_top_level_shape(self) -> None:
         with self.assertRaises(AdapterError):
             records_from_fixture({"listings": []})

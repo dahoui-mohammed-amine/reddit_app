@@ -10,7 +10,6 @@ from .models import Decision, PrefilterResult, RawRecord, SourceLineage, _lineag
 # These are deliberately literal, high-signal markers. This node does not try
 # to infer relevance, sentiment, or spam semantics.
 DEFAULT_SPAM_MARKERS = (
-    "spam",
     "buy now",
     "free money",
     "click here",
@@ -87,6 +86,8 @@ class PrefilterConfig:
     spam_markers: tuple[str, ...] = DEFAULT_SPAM_MARKERS
 
     def __post_init__(self) -> None:
+        if isinstance(self.subreddit_scope, str) or isinstance(self.spam_markers, str):
+            raise ValueError("subreddit_scope and spam_markers must be sequences")
         if (
             not isinstance(self.minimum_text_length, int)
             or isinstance(self.minimum_text_length, bool)
@@ -130,9 +131,7 @@ def _first_non_null(raw: Mapping[str, Any], fields: Sequence[str]) -> Any:
 
 
 def _canonical_id(value: Any, prefix: str) -> str | None:
-    if not _present(value):
-        return None
-    if isinstance(value, bool):
+    if not isinstance(value, str) or not _present(value):
         return None
     candidate = str(value).strip()
     if _QUALIFIED_ID_RE.match(candidate):
@@ -208,7 +207,7 @@ def _relationship(raw: Mapping[str, Any], record_type: str) -> _Relationship:
 
 
 def _canonical_parent_id(value: Any) -> str | None:
-    if not _present(value) or isinstance(value, bool):
+    if not isinstance(value, str) or not _present(value):
         return None
     candidate = str(value).strip()
     if _QUALIFIED_ID_RE.match(candidate):
@@ -368,7 +367,7 @@ class Prefilter:
         record_type = getattr(record, "record_type", "unknown")
         raw = getattr(record, "raw", None)
 
-        if record_type not in {"post", "comment"} or not isinstance(raw, Mapping):
+        if not isinstance(record_type, str) or record_type not in {"post", "comment"} or not isinstance(raw, Mapping):
             structural.add("MALFORMED_RECORD")
             metadata["malformed"] = "record_type must be post/comment and raw must be an object"
             return self._decision(record, evidence_id, raw_sha256, None, structural, lineage, metadata), None
