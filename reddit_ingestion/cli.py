@@ -29,7 +29,7 @@ def _existing_plan_state(path: Path, provider: str, subreddits: tuple[str, ...],
                 known_query += f" AND ({REFRESH_ELIGIBILITY})"
                 known_params: tuple[object, ...] = (*subreddits, refresh_expiry_days)
             else:
-                known_query += " AND datetime(CASE WHEN created_at IS NOT NULL THEN COALESCE(datetime(created_at), datetime(created_at, 'unixepoch')) ELSE datetime(observed_at) END, '+' || ? || ' days') > datetime('now')"
+                known_query += " AND datetime(COALESCE(datetime(created_at), datetime(created_at, 'unixepoch'), datetime(observed_at)), '+' || ? || ' days') > datetime('now')"
                 known_params = (*subreddits, refresh_expiry_days)
             known_posts = int(connection.execute(known_query, known_params).fetchone()[0])
             resume_pages = int(

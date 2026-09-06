@@ -10,7 +10,7 @@ from typing import Any, Iterator
 from .models import CommentSnapshot, Gap, PageResult, PostSnapshot, RefreshResult, RequestRecord
 
 
-REFRESH_ELIGIBILITY = "(refresh_until IS NOT NULL AND datetime(refresh_until) > datetime('now')) OR (refresh_until IS NULL AND datetime(CASE WHEN created_at IS NOT NULL THEN COALESCE(datetime(created_at), datetime(created_at, 'unixepoch')) ELSE datetime(observed_at) END, '+' || ? || ' days') > datetime('now'))"
+REFRESH_ELIGIBILITY = "(refresh_until IS NOT NULL AND datetime(refresh_until) > datetime('now')) OR (refresh_until IS NULL AND datetime(COALESCE(datetime(created_at), datetime(created_at, 'unixepoch'), datetime(observed_at)), '+' || ? || ' days') > datetime('now'))"
 
 
 SCHEMA = """
@@ -138,10 +138,7 @@ class Database:
             SET refresh_until = strftime(
                 '%Y-%m-%dT%H:%M:%SZ',
                 datetime(
-                    CASE
-                        WHEN created_at IS NOT NULL THEN COALESCE(datetime(created_at), datetime(created_at, 'unixepoch'))
-                        ELSE datetime(observed_at)
-                    END,
+                    COALESCE(datetime(created_at), datetime(created_at, 'unixepoch'), datetime(observed_at)),
                     '+' || ? || ' days'
                 )
             )

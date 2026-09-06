@@ -356,6 +356,26 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(refresh_until, migrated_expiry)
             db.close()
 
+    def test_migration_falls_back_for_legacy_invalid_source_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_path = root / "db.sqlite3"
+            db = Database(database_path)
+            observed = "2026-09-06T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            with db.transaction():
+                db.save_page(
+                    run_id,
+                    "fixture",
+                    "freelance",
+                    PageResult([PostSnapshot("p", "t3_p", "freelance", created_at="not-a-date", observed_at=observed)], None, None, observed, "fixture://p", 200, "request"),
+                )
+            db.close()
+            db = Database(database_path, 30)
+            refresh_until = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='p'").fetchone()[0]
+            self.assertEqual(refresh_until, "2026-10-06T00:00:00Z")
+            db.close()
+
     def test_partial_comment_results_do_not_delete_existing_comments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
