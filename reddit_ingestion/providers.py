@@ -51,6 +51,7 @@ class ProviderError(RuntimeError):
         request_id: str | None = None,
         url: str | None = None,
         provider_payload: Any = None,
+        provider_payload_present: bool = False,
     ):
         super().__init__(message)
         self.status = status
@@ -59,6 +60,7 @@ class ProviderError(RuntimeError):
         self.request_id = request_id
         self.url = url
         self.provider_payload = provider_payload
+        self.provider_payload_present = provider_payload_present or provider_payload is not None
         self.attempts: list[RequestAttempt] = []
 
 
@@ -155,6 +157,7 @@ class JsonClient:
                     request_id=request_id,
                     url=url,
                     provider_payload=parsed,
+                    provider_payload_present=True,
                 )
                 error.attempts = list(self.last_attempts)
                 raise error
@@ -166,6 +169,7 @@ class JsonClient:
                     request_id=request_id,
                     url=url,
                     provider_payload=parsed,
+                    provider_payload_present=True,
                 )
                 error.attempts = list(self.last_attempts)
                 raise error
@@ -285,8 +289,8 @@ def _request_records(
 
 
 def _failed_request_records(client: Any, operation: str, url: str, error: ProviderError, metadata: dict[str, Any] | None = None) -> list[RequestRecord]:
-    details = {"url": url, "error": str(error)}
-    if error.provider_payload is not None:
+    details = {"url": url, "error": str(error), "provider_payload_present": error.provider_payload_present}
+    if error.provider_payload_present:
         details["raw_payload"] = error.provider_payload
         details["provider_error"] = error.provider_payload
     if metadata:
@@ -1074,15 +1078,23 @@ class BrightDataProvider(HttpProviderBase):
 
     @classmethod
     def _record_urls_valid(cls, raw: Mapping[str, Any]) -> bool:
-        values = [raw.get(key) for key in ("url", "post_url", "permalink") if raw.get(key)]
+        values = [raw.get(key) for key in ("community_url", "subreddit_url", "url", "post_url", "permalink") if raw.get(key)]
         return all(cls._absolute_reddit_url(value) is not None for value in values)
 
     @classmethod
-    def _record_subreddit(cls, raw: Mapping[str, Any]) -> str | None:
+    def _record_subreddits(cls, raw: Mapping[str, Any]) -> list[str]:
+        values: list[str] = []
         for key in ("community_url", "subreddit_url", "url", "post_url", "permalink", "community_name", "subreddit", "community"):
             subreddit = cls._subreddit_from_value(raw.get(key))
             if subreddit:
-                return subreddit
+                values.append(subreddit)
+        return values
+
+    @classmethod
+    def _record_subreddit(cls, raw: Mapping[str, Any]) -> str | None:
+        values = cls._record_subreddits(raw)
+        if values and len({cls._subreddit_key(value) for value in values}) == 1:
+            return values[0]
         return None
 
     @staticmethod
@@ -1429,7 +1441,12 @@ class BrightDataProvider(HttpProviderBase):
         requested_url = self._requested_post_url(post)
         requested_url_id = self._post_url_id(requested_url)
         raw_url_values = [raw.get(key) for key in ("url", "post_url", "permalink") if raw.get(key)]
-        if any(self._absolute_reddit_url(value) is None for value in raw_url_values):
+        if not self._record_urls_valid(raw):
+            return False
+        raw_subreddits = self._record_subreddits(raw)
+        if raw_subreddits and len({self._subreddit_key(value) for value in raw_subreddits}) != 1:
+            return False
+        if raw_subreddits and post.subreddit and self._subreddit_key(raw_subreddits[0]) != self._subreddit_key(post.subreddit):
             return False
         raw_url_ids = {url_id for value in raw_url_values if (url_id := self._post_url_id(value)) is not None}
         try:

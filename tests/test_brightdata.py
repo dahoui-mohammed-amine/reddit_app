@@ -342,6 +342,49 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(refreshed.posts, [])
         self.assertTrue(any(gap.reason == "provider_error" for gap in refreshed.gaps))
 
+    def test_cross_subreddit_identity_is_rejected(self) -> None:
+        discovery_record = {
+            "post_id": "p",
+            "url": "https://www.reddit.com/r/smallbusiness/comments/p/title/",
+            "community_url": "https://www.reddit.com/r/freelance/",
+        }
+
+        class DiscoveryClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [discovery_record], HttpResponse(200, {}, b""), "request"
+
+        class RefreshClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [{"post_id": "p", "url": "https://www.reddit.com/r/freelance/comments/p/title/"}], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness", "freelance"))
+            discovered = BrightDataProvider(cfg, client=DiscoveryClient()).discover("smallbusiness", None, cfg)
+            refreshed = BrightDataProvider(cfg, client=RefreshClient()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertEqual(discovered.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in discovered.gaps))
+        self.assertEqual(refreshed.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in refreshed.gaps))
+
+    def test_null_provider_error_payload_is_retained(self) -> None:
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            return HttpResponse(401, {}, b"null")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            provider = BrightDataProvider(cfg, client=JsonClient(timeout=1, retries=0, transport=transport, sleep=lambda _: None))
+            result = provider.discover("smallbusiness", None, cfg)
+
+        metadata = result.request_records[0].metadata
+        self.assertIn("raw_payload", metadata)
+        self.assertIsNone(metadata["raw_payload"])
+        self.assertIn("provider_error", metadata)
+        self.assertIsNone(metadata["provider_error"])
+        self.assertTrue(metadata["provider_payload_present"])
+
     def test_202_snapshot_is_a_safe_unsupported_result_without_followup(self) -> None:
         calls: list[int] = []
 
