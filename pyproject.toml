@@ -1,7 +1,7 @@
 [project]
 name = "reddit-ingestion"
 version = "0.1.0"
-description = "Local-first, fixture-testable Reddit ingestion boundary"
+description = "Local-first Reddit ingestion and evidence-preserving deterministic pre-filter"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
@@ -13,7 +13,7 @@ reddit-ingest = "reddit_ingestion.cli:main"
 package = true
 
 [tool.setuptools.packages.find]
-include = ["reddit_ingestion*"]
+include = ["reddit_ingestion*", "reddit_prefilter*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

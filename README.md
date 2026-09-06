@@ -1,10 +1,14 @@
-# Reddit ingestion node
+# Reddit ingestion and pre-filter nodes
 
-A small local-first Reddit ingestion boundary. It discovers `new` posts, stores current normalized post/comment records, and appends post engagement observations so later analysis can compare observations. It does not calculate hotness, trends, opportunities, or any downstream result.
+This repository contains the local-first Reddit ingestion node and a standalone deterministic pre-filter.
+The ingestion node discovers new posts, stores current normalized post and comment records, and appends post engagement observations for later analysis.
+The pre-filter classifies raw post and comment observations without calling Reddit, using an LLM, or inferring semantic relevance.
+Neither node calculates hotness, trends, opportunities, or any downstream result.
 
 ## Safe first run
 
-The checked-in configuration uses the fixture provider. It performs no network calls, needs no credentials, and consumes no provider units.
+The checked-in configuration uses the fixture provider.
+It performs no network calls, needs no credentials, and consumes no provider units.
 
 ```sh
 uv sync
@@ -17,22 +21,26 @@ uv run reddit-ingest status --config config.toml
 ```
 
 `--dry-run` reports provider status and the estimated plan without network calls or ingestion writes.
-The SQLite database is `data/reddit.sqlite3` by default and is intentionally ignored by Git. The sample fixture covers `r/freelance`, `r/smallbusiness`, and `r/SaaS`, pagination, changing scores/comment counts, and comments.
+The SQLite database is `data/reddit.sqlite3` by default and is intentionally ignored by Git.
+The sample fixture covers `r/freelance`, `r/smallbusiness`, and `r/SaaS`, pagination, changing scores and comment counts, and comments.
 
 ## Configuration
 
-Copy `config.example.toml` and edit the explicit `[ingestion]`, `[comments]`, and `[provider]` sections. The initial subreddits are configuration values, not hidden in application code.
+Copy `config.example.toml` and edit the explicit `[ingestion]`, `[comments]`, and `[provider]` sections.
+The initial subreddits are configuration values, not hidden in application code.
 
 - `listing_limit` is capped at Reddit-style 100.
 - `refresh_interval_minutes` controls which stored posts are due for a later `refresh` pass.
-- `refresh_expiry_days` sets each post's refresh-until window from its source creation time when available, falling back to observation time; expired posts remain stored with their history but are no longer refreshed.
-- `comments.mode` is `bounded` or `full`. Bounded mode records explicit gaps when depth/limit truncates comments. Full mode is opt-in; FetchLayer reports full expansion as unsupported.
-- `provider.min_request_interval_seconds` paces live request attempts; retry backoff and provider retry-after values apply only to providers that retry.
-- `provider.name` is `fixture`, `redditapis`, `fetchlayer`, or `brightdata`; fixture remains the safe default.
-
-## Provider access and cost gate
-
-The app contains configuration seams for the researched providers, including opt-in live access to the Bright Data Reddit Scraper API:
+- `refresh_expiry_days` sets each post's refresh-until window from its source creation time when available, falling back to observation time.
+- Expired posts remain stored with their history but are no longer refreshed.
+- `comments.mode` is `bounded` or `full`.
+- Bounded mode records explicit gaps when depth or limit truncates comments.
+- Full mode is opt-in.
+- FetchLayer reports full expansion as unsupported.
+- `provider.min_request_interval_seconds` paces live requests before each attempt.
+- Retry backoff and provider retry-after values still apply.
+- `provider.name` is `fixture`, `redditapis`, `fetchlayer`, or `brightdata`.
+- Bright Data remains disabled unless explicitly selected with its credential and `--allow-paid`.
 
 ```sh
 # Edit config.toml first: [provider] name = "redditapis".
@@ -50,42 +58,144 @@ export BRIGHTDATA_API_KEY='...'
 uv run reddit-ingest run --config config.toml --mode discover --allow-paid
 ```
 
-No call occurs unless the selected provider's key exists and `--allow-paid` is supplied. Missing credentials are reported as a provider-access error. The application never automatically falls back from one provider to another, and it never silently expands every comment. Review the plan and provider terms first; no real secrets belong in this repository.
+No call occurs unless the selected provider's key exists and `--allow-paid` is supplied.
+Missing credentials are reported as a provider-access error.
+The application never automatically falls back from one provider to another.
+It never silently expands every comment.
+Review the plan and provider terms first.
+No real secrets belong in this repository.
 
-Bright Data uses the documented Reddit dataset IDs `gd_lvz8ah06191smkebj4` (posts/discovery) and `gd_lvzdpsdlw09j6t702` (comments), with `POST /datasets/v3/scrape` and an `{"input": [...]}` body. Subreddit discovery batches up to 20 subreddit URLs with `sort_by = "new"`; it does not invent cursors or pagination. Discovery does not fan out to comments. Bright Data comments are unsupported because documented comment records expose no depth and `days_back` is not a count cap. Asynchronous `202` snapshots are reported as unsupported rather than polled.
+Bright Data uses the documented Reddit dataset IDs `gd_lvz8ah06191smkebj4` (posts/discovery) and `gd_lvzdpsdlw09j6t702` (comments), with `POST /datasets/v3/scrape` and an `{"input": [...]}` body.
+Subreddit discovery batches up to 20 subreddit URLs with `sort_by = "new"`; it does not invent cursors or pagination.
+Discovery does not fan out to comments.
+Bright Data comments are unsupported because documented comment records expose no depth and `days_back` is not a count cap.
+Asynchronous `202` snapshots are reported as unsupported rather than polled.
 
-Bright Data request records retain the request body, raw JSON response/error, `fetched_at`, dataset ID, requested-input count, returned-record count, and provider-error count. These are request-versus-record observations only; undocumented billing/credit semantics are never estimated.
+Bright Data request records retain the request body, raw JSON response/error, `fetched_at`, dataset ID, requested-input count, returned-record count, and provider-error count.
+These are request-versus-record observations only; undocumented billing/credit semantics are never estimated.
 
-The RedditAPIs adapter uses the documented subreddit listing and up-to-100 `t3_` fullname batch refresh shape. The FetchLayer adapter uses subreddit-post and one-post-URL endpoints; its full comment expansion is unsupported and records an explicit unexpanded gap while still refreshing post metrics. Provider responses retain cache/status metadata where supplied. Score and comment-count changes are observations, not exact vote-arrival rates.
+The RedditAPIs adapter uses the documented subreddit listing and up-to-100 `t3_` fullname batch refresh shape.
+The FetchLayer adapter uses subreddit-post and one-post-URL endpoints.
+Its full comment expansion is unsupported and records an explicit unexpanded gap while still refreshing post metrics.
+Provider responses retain cache and status metadata where supplied.
+Score and comment-count changes are observations, not exact vote-arrival rates.
 
-## Data and deletion posture
+## Ingestion data and deletion posture
 
 SQLite tables include:
 
-- current `posts` and `comments`, keyed by stable IDs and preserving parent/link relationships;
+- current `posts` and `comments`, keyed by stable IDs and preserving parent and link relationships;
 - append-only `post_observations` for engagement history only;
 - `checkpoints` for subreddit cursors;
-- `requests` and `gaps` for source metadata, failures, blocked/deleted/removed/truncated/unexpanded content, and resumability;
+- `requests` and `gaps` for source metadata, failures, blocked, deleted, removed, truncated, and unexpanded content;
 - `runs` for one-shot orchestration boundaries.
 
-Deleted or removed content clears mutable text/author fields while retaining stable identity and status. To clear those fields again after policy changes:
+Deleted or removed content clears mutable text and author fields while retaining stable identity and status.
+To clear those fields again after policy changes:
 
 ```sh
 uv run reddit-ingest purge --config config.toml
 ```
 
-The purge command clears normalized deleted/removed fields but does not remove Bright Data raw payloads retained in request or observation metadata. No raw-evidence retention window or purge policy is configured; confirm applicable Reddit/provider retention and deletion obligations before storing live content.
+The purge command clears normalized deleted/removed fields but does not remove Bright Data raw payloads retained in request or observation metadata.
+The ingestion database is not an immutable raw Reddit archive, and no automatic raw-evidence purge is configured.
+Confirm applicable Reddit and provider retention and deletion obligations before storing live content.
 
 ## One-shot scheduling
 
-There is no daemon or queue. Run the command once from a macOS launchd job, cron entry, or another scheduler after choosing cadence and budget. Use `--mode discover` for listings and `--mode refresh` for due known posts; `--mode run` performs both in one invocation.
+There is no daemon or queue.
+Run the command once from a macOS launchd job, cron entry, or another scheduler after choosing cadence and budget.
+Use `--mode discover` for listings and `--mode refresh` for due known posts.
+Use `--mode run` for both operations in one invocation.
+
+## Pre-filter node
+
+The pre-filter public input boundary is `reddit_prefilter.RawRecord`:
+
+```python
+from reddit_prefilter import Prefilter, PrefilterConfig, RawRecord, SourceLineage
+
+records = [
+    RawRecord(
+        record_type="post",
+        raw={"id": "abc", "subreddit": "freelance", "title": "...", "selftext": "..."},
+        lineage=SourceLineage(
+            provider="fixture",
+            observed_at="2026-09-05T00:00:00Z",
+            source_url="fixture://freelance/new",
+            request_id="request-1",
+        ),
+    )
+]
+result = Prefilter(
+    PrefilterConfig(minimum_text_length=20, subreddit_scope=("freelance",))
+).evaluate(records)
+```
+
+`RawRecord.raw` is an immutable snapshot of the untouched provider mapping.
+`SourceLineage` carries the provider, observation time, source URL, request and run identifiers, response metadata, and cache metadata.
+A comment may carry `subreddit` on `RawRecord` as adapter context when that field is absent from the comment payload.
+Its raw `link_id`, `post_id`, and `parent_id` remain preserved and checked.
+
+A fixture can use the same envelope through `records_from_fixture` or `load_fixture`:
+
+```json
+{
+  "records": [
+    {
+      "record_type": "post",
+      "lineage": {"provider": "fixture", "observed_at": "2026-09-05T00:00:00Z"},
+      "raw": {"id": "abc", "subreddit": "freelance", "title": "..."}
+    }
+  ]
+}
+```
+
+The result contains all input records and one `Decision` per occurrence.
+Each decision references a SHA-256 evidence ID and includes the raw hash, lineage, rule version, normalized text length, relationship IDs, scope result, matched markers, and stable reason codes.
+Filtering therefore never deletes source evidence.
+Duplicate identity is `(record_type, canonical ID)`.
+The first occurrence in input order is canonical and later occurrences are rejected as `DUPLICATE_RECORD`.
+
+## Pre-filter rules
+
+A record is `accepted`, `rejected`, or `incomplete`.
+
+- missing, invalid, or conflicting IDs are `incomplete`;
+- malformed records, lineage, relationships, or content state are `incomplete`;
+- missing comment-to-post relationships and bad parent IDs are `incomplete`;
+- missing or unavailable configured subreddit context is `incomplete`;
+- deleted or removed content is `rejected`;
+- duplicate IDs are `rejected`;
+- text shorter than `minimum_text_length` is `rejected`;
+- literal case-insensitive configured spam markers are `rejected`;
+- out-of-scope subreddits are `rejected`;
+- all other valid records are `accepted` with `ACCEPTED`.
+
+Post text is the title plus body.
+Comment text is the body.
+Whitespace is normalized before counting or matching.
+`minimum_text_length=0` disables that rule.
+An empty `subreddit_scope` disables scope checking.
+The default spam list is intentionally short and literal: `buy now`, `free money`, `click here`, `promo code`, `crypto giveaway`, `telegram.me`, and `discord.gg/`.
+
+## Ingestion integration boundary
+
+The pre-filter intentionally accepts raw evidence through `RawRecord` rather than importing ingestion internals.
+The current ingestion models expose normalized post and comment snapshots, relationships, and request metadata, but they do not retain every untouched provider payload.
+A direct snapshot adapter would therefore lose evidence required by this node.
+
+When these nodes are connected, the ingestion provider boundary must emit one `RawRecord` per raw post or comment with source lineage and adapter subreddit context where needed.
+Normalized snapshots must not be substituted for raw source evidence.
 
 ## Tests
 
-Tests are fixture-driven and require no credentials or network calls:
+The test suite is fixture-driven and requires no credentials or network calls:
 
 ```sh
 uv run python -m unittest discover -s tests -v
+uvx ruff check .
+uvx ruff format --check .
 ```
 
-They cover normalization, cursor resume, idempotency, historical observations, bounded comment gaps, deletion/update clearing, retryable provider errors, and the provider access/cost gate.
+The tests cover ingestion normalization, cursor resume, idempotency, historical observations, bounded comment gaps, deletion and update clearing, provider access and cost gating, deterministic pre-filter rules, malformed evidence, relationship preservation, and repeat-run idempotence.
