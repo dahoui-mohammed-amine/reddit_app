@@ -63,7 +63,7 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(post.comments[0].parent_id, "t3_abc")
         self.assertEqual(post.score, 7)
         self.assertEqual(post.num_comments, 2)
-        fallback = parse_post({"id": "fallback", "created_at_iso": None, "created_utc": "2026-09-01T00:00:00Z", "num_comments": None, "commentCount": 2})
+        fallback = parse_post({"id": "fallback", "created_at_iso": "", "created_utc": "2026-09-01T00:00:00Z", "num_comments": "", "commentCount": 2})
         self.assertEqual(fallback.created_at, "2026-09-01T00:00:00Z")
         self.assertEqual(fallback.num_comments, 2)
 
@@ -703,6 +703,8 @@ class IngestionTests(unittest.TestCase):
                 )
             metadata = db.connection.execute("SELECT metadata_json FROM post_observations WHERE post_id='p'").fetchone()[0]
             self.assertFalse(json.loads(metadata)["comments_expanded"])
+            request_metadata = db.connection.execute("SELECT metadata_json FROM requests WHERE operation='discover'").fetchone()[0]
+            self.assertFalse(json.loads(request_metadata)["comments_expanded"])
             self.assertEqual(db.connection.execute("SELECT reason FROM gaps WHERE entity_id='c'").fetchone()[0], "deleted")
             db.close()
 
@@ -1016,7 +1018,8 @@ class IngestionTests(unittest.TestCase):
                 db.save_page(run_id, "redditapis", "freelance", page)
             plan = plan_for(db, RedditApisProvider(cfg), cfg)
             self.assertEqual(plan.discovery_requests, 3)
-            self.assertEqual(plan.estimated_requests, 909)
+            self.assertEqual(plan.refresh_events, 100)
+            self.assertEqual(plan.estimated_requests, 1212)
             db.close()
 
     def test_full_redditapis_plan_does_not_claim_bounded_comment_cost(self) -> None:
@@ -1407,7 +1410,7 @@ fixture_path = \"{FIXTURE}\"
                 self.assertEqual(cli_main(["plan", "--config", str(config_path), "--dry-run"]), 0)
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["status"], "dry_run")
-            self.assertEqual(payload["plan"]["refresh_events"], 1)
+            self.assertEqual(payload["plan"]["refresh_events"], 100)
             output = StringIO()
             with redirect_stdout(output):
                 self.assertEqual(cli_main(["plan", "--config", str(config_path), "--dry-run", "--mode", "discover"]), 0)

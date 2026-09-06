@@ -147,6 +147,12 @@ class Provider(Protocol):
     def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult: ...
 
 
+def _run_refresh_capacity(config: Config, discovery: int, known_posts: int, mode: str) -> int:
+    if mode == "run":
+        return known_posts + discovery * config.listing_limit
+    return known_posts
+
+
 def _env_key(name: str) -> str | None:
     value = os.environ.get(name)
     return value.strip() if value and value.strip() else None
@@ -338,8 +344,9 @@ class FixtureProvider:
 
     def plan(self, config: Config, known_posts: int, *, resume_pages: int = 0, mode: str = "run") -> Plan:
         discovery = len(config.subreddits) * config.max_discovery_pages + resume_pages if mode in {"run", "discover"} else 0
-        refresh = 1 if known_posts and mode in {"run", "refresh"} else 0
-        refresh_events = min(known_posts, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
+        refreshable = _run_refresh_capacity(config, discovery, known_posts, mode)
+        refresh = 1 if refreshable and mode in {"run", "refresh"} else 0
+        refresh_events = min(refreshable, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
         return Plan("fixture", discovery, refresh_events, discovery + refresh, 0, "free fixture calls", ["No network calls or credentials are used."])
 
     def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
@@ -457,8 +464,9 @@ class RedditApisProvider(HttpProviderBase):
     base_url = "https://api.redditapis.com"
 
     def plan(self, config: Config, known_posts: int, *, resume_pages: int = 0, mode: str = "run") -> Plan:
-        refresh = min(known_posts, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
         discovery = len(config.subreddits) * config.max_discovery_pages + resume_pages if mode in {"run", "discover"} else 0
+        refreshable = _run_refresh_capacity(config, discovery, known_posts, mode)
+        refresh = min(refreshable, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
         refresh_batches = (refresh + 99) // 100
         calls = discovery + refresh_batches
         discovered_capacity = discovery * config.listing_limit
@@ -471,6 +479,8 @@ class RedditApisProvider(HttpProviderBase):
             notes.append("Estimate includes one newest-page poll per resumable subreddit.")
         if discovery:
             notes.append("Comment request estimate uses the listing-limit upper bound for newly discovered posts.")
+        if mode == "run" and discovery:
+            notes.append("Run estimate includes possible refreshes for newly discovered posts.")
         notes.append(f"Estimated requests include up to {config.max_retries + 1} transport attempts per call.")
         if config.comments_mode == "full":
             notes.append("Full comment expansion has unknown, unbounded pagination cost; review provider billing before live execution.")
@@ -662,8 +672,9 @@ class FetchLayerProvider(HttpProviderBase):
     base_url = "https://api.fetchlayer.dev/reddit"
 
     def plan(self, config: Config, known_posts: int, *, resume_pages: int = 0, mode: str = "run") -> Plan:
-        refresh = min(known_posts, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
         discovery = len(config.subreddits) * config.max_discovery_pages + resume_pages if mode in {"run", "discover"} else 0
+        refreshable = _run_refresh_capacity(config, discovery, known_posts, mode)
+        refresh = min(refreshable, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
         discovered_capacity = discovery * config.listing_limit
         comment_expansions = discovered_capacity if config.comments_mode == "bounded" else 0
         calls = discovery + refresh + comment_expansions
@@ -672,6 +683,8 @@ class FetchLayerProvider(HttpProviderBase):
             notes.append("No documented multi-post refresh batch; each post URL is one call.")
         if discovery:
             notes.append("Discovery estimate includes the configured maximum listing pages.")
+        if mode == "run" and discovery:
+            notes.append("Run estimate includes possible refreshes for newly discovered posts.")
         if resume_pages and discovery:
             notes.append("Estimate includes one newest-page poll per resumable subreddit.")
         notes.append(f"Estimated requests include up to {config.max_retries + 1} transport attempts per call.")

@@ -13,7 +13,7 @@ def utc_now() -> str:
 
 def _value(raw: Mapping[str, Any], *keys: str) -> Any:
     for key in keys:
-        if key in raw and raw[key] is not None:
+        if key in raw and raw[key] is not None and raw[key] != "":
             return raw[key]
     return None
 

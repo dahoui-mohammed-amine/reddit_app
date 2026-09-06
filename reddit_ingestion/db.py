@@ -216,6 +216,8 @@ class Database:
             self._save_observation(post, provider, page, result_metadata=self._observation_metadata(page, post.post_id, comments_incomplete=comments_incomplete))
             if post.deleted or post.removed:
                 page.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
+        if "comments_expanded" in page.metadata and any(gap.entity_type == "comment" for gap in page.gaps):
+            page.metadata["comments_expanded"] = False
         listing_status = page.metadata.get("listing_status")
         if listing_status in {"truncated", "unknown"}:
             page.gaps.append(Gap("listing", "truncated", subreddit=subreddit, detail=f"listing_status={listing_status}"))
@@ -254,6 +256,8 @@ class Database:
             )
             if post.deleted or post.removed:
                 result.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
+        if "comments_expanded" in result.metadata and any(gap.entity_type == "comment" for gap in result.gaps):
+            result.metadata["comments_expanded"] = False
         for gap in result.gaps:
             self._save_gap(run_id, provider, gap, result.observed_at)
         self._save_request_records(run_id, provider, result.request_records, "refresh", result.request_id, result.response_status, result.cache_status, result.cache_observed_at, result.metadata)
