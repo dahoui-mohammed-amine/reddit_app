@@ -74,6 +74,10 @@ class IngestionTests(unittest.TestCase):
             parse_comment({"id": "t1_"}, post=post, observed_at=post.observed_at)
         with self.assertRaises(ValueError):
             parse_post({"id": {"bad": 1}})
+        with self.assertRaises(ValueError):
+            parse_comment({"id": "c", "parent_id": {"id": "c2"}}, post=post, observed_at=post.observed_at)
+        with self.assertRaises(ValueError):
+            parse_comment({"id": "c", "parent_id": "c2"}, post=post, observed_at=post.observed_at)
 
     def test_comment_links_must_match_requested_post(self) -> None:
         post = parse_post({"id": "p1"}, observed_at="2026-09-05T00:00:00Z")
@@ -225,6 +229,33 @@ class IngestionTests(unittest.TestCase):
             run_once(db, Provider(), cfg, "discover")
             refresh_until = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='numeric'").fetchone()[0]
             self.assertEqual(refresh_until, "1970-01-31T00:00:00Z")
+            db.close()
+
+    def test_invalid_created_timestamp_falls_back_to_observation_expiry(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                return PageResult(
+                    [PostSnapshot("invalid", "t3_invalid", subreddit, created_at="not-a-date", observed_at="2026-09-06T00:00:00Z")],
+                    cursor,
+                    None,
+                    "2026-09-06T00:00:00Z",
+                    "fixture://invalid",
+                    200,
+                    "fixture",
+                )
+
+            def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
+                raise AssertionError("refresh is not part of discovery mode")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            cfg = replace(config(root), subreddits=("freelance",), refresh_expiry_days=2)
+            run_once(db, Provider(), cfg, "discover")
+            row = db.connection.execute("SELECT created_at, refresh_until FROM posts WHERE post_id='invalid'").fetchone()
+            self.assertEqual(tuple(row), ("not-a-date", "2026-09-08T00:00:00Z"))
             db.close()
 
     def test_refresh_expiry_preserves_stored_source_timestamp(self) -> None:
@@ -940,6 +971,21 @@ class IngestionTests(unittest.TestCase):
             client.request("GET", "https://example.test", headers={})
         self.assertIsNone(context.exception.attempts[-1].billed)
 
+    def test_json_client_audits_oserror_transport_failures(self) -> None:
+        calls: list[int] = []
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            calls.append(len(calls))
+            raise OSError("interrupted read")
+
+        client = JsonClient(timeout=1, retries=1, transport=transport, sleep=lambda _: None)
+        with self.assertRaises(ProviderError) as context:
+            client.request("GET", "https://example.test", headers={})
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(context.exception.retryable)
+        self.assertEqual(len(context.exception.attempts), 2)
+        self.assertTrue(all(attempt.error for attempt in context.exception.attempts))
+
     def test_live_provider_requires_access_and_explicit_cost_consent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(os.environ, {}, clear=True):
@@ -1107,6 +1153,20 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual((post.score, post.ups, post.upvote_ratio, post.num_comments), (7, 8, 0.9, 2))
             self.assertTrue(result.metadata["comments_expanded"])
             self.assertFalse(any(gap.reason == "unexpanded" for gap in result.gaps))
+
+    def test_fetchlayer_discovery_preserves_listing_count_for_completeness(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/community-posts" in url:
+                    return {"items": [{"id": "p", "permalink": "/r/freelance/comments/p/post/", "num_comments": 5}]}, HttpResponse(200, {}, b""), "listing-request"
+                return {"id": "p", "name": "t3_p", "num_comments": 1, "comments": [{"id": "c1"}]}, HttpResponse(200, {}, b""), "expansion-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="fetchlayer")
+            result = FetchLayerProvider(cfg, client=Client()).discover("freelance", None, cfg)
+            self.assertEqual(result.posts[0].num_comments, 5)
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "unexpanded" for gap in result.gaps))
+            self.assertFalse(result.metadata["comments_expanded"])
 
     def test_http_403_comment_failures_remain_provider_errors(self) -> None:
         class RedditApisClient:

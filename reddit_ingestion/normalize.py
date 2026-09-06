@@ -123,6 +123,23 @@ def _comment_link_id(raw: Mapping[str, Any]) -> str | None:
     return links[0] if links else None
 
 
+def _parent_id(raw: Mapping[str, Any]) -> str | None:
+    values: list[str] = []
+    for key in ("parent_id", "parentFullname"):
+        if key not in raw or raw[key] is None:
+            continue
+        value = raw[key]
+        if not isinstance(value, (str, int, float, bool)):
+            raise ValueError("comment parent id must be scalar")
+        normalized = str(value)
+        if len(normalized) <= 3 or not normalized.startswith(("t1_", "t3_")):
+            raise ValueError("comment parent id must use a t1_ or t3_ fullname")
+        values.append(normalized)
+    if values and any(value != values[0] for value in values[1:]):
+        raise ValueError("comment parent id aliases disagree")
+    return values[0] if values else None
+
+
 def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed_at: str) -> CommentSnapshot:
     cid = comment_id(raw)
     linked_post_id = _comment_link_id(raw)
@@ -133,7 +150,7 @@ def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed
         comment_id=cid,
         fullname=fullname,
         post_id=post.post_id if post else linked_post_id,
-        parent_id=_text(_value(raw, "parent_id", "parentFullname")),
+        parent_id=_parent_id(raw),
         author=_text(_value(raw, "author", "author_username")),
         body=_text(_value(raw, "body", "bodyText", "text")),
         permalink=_relative_permalink(_text(_value(raw, "permalink", "url"))),

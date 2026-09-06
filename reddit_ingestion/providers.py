@@ -56,6 +56,8 @@ def urllib_transport(method: str, url: str, headers: Mapping[str, str], body: by
         return HttpResponse(exc.code, {k.lower(): v for k, v in exc.headers.items()}, exc.read())
     except URLError as exc:
         raise ProviderError(f"network error: {exc.reason}", retryable=True) from exc
+    except OSError as exc:
+        raise ProviderError(f"transport error: {exc}", retryable=True) from exc
 
 
 class JsonClient:
@@ -90,13 +92,14 @@ class JsonClient:
             self._last_request_at = time.monotonic()
             try:
                 response = self.transport(method, url, request_headers, body, self.timeout)
-            except ProviderError as exc:
-                self.last_attempts.append(RequestAttempt(exc.status, exc.billed, str(exc)))
-                exc.url = exc.url or url
-                if not exc.retryable or attempt >= self.retries:
-                    exc.request_id = exc.request_id or request_id
-                    exc.attempts = list(self.last_attempts)
-                    raise
+            except (OSError, ProviderError) as exc:
+                error = exc if isinstance(exc, ProviderError) else ProviderError(f"transport error: {exc}", retryable=True)
+                self.last_attempts.append(RequestAttempt(error.status, error.billed, str(error)))
+                error.url = error.url or url
+                if not error.retryable or attempt >= self.retries:
+                    error.request_id = error.request_id or request_id
+                    error.attempts = list(self.last_attempts)
+                    raise error
                 self.sleep(2**attempt)
                 continue
             self.last_attempts.append(RequestAttempt(response.status, None))
@@ -716,8 +719,11 @@ class FetchLayerProvider(HttpProviderBase):
                     post.comments = expanded_post.comments
                     for field in ("score", "ups", "upvote_ratio", "num_comments"):
                         value = getattr(expanded_post, field)
-                        if value is not None:
+                        if getattr(post, field) is None and value is not None:
                             setattr(post, field, value)
+                    count_gap = comment_count_gap(post)
+                    if count_gap and not any(gap.entity_id == post.post_id and gap.reason == "unexpanded" for gap in gaps):
+                        gaps.append(count_gap)
         return PageResult(
             posts,
             cursor,

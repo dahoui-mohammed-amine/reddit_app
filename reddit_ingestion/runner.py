@@ -24,7 +24,7 @@ def config_dict(config: Config) -> dict[str, Any]:
 def _parse_refresh_time(value: str) -> datetime | None:
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    except (TypeError, ValueError):
         try:
             return datetime.fromtimestamp(float(value), tz=timezone.utc)
         except (OSError, OverflowError, ValueError):
@@ -43,6 +43,8 @@ def _apply_refresh_expiry(
         source_time = post.created_at or source_created_at.get(post.post_id)
         if source_time:
             observed = _parse_refresh_time(source_time)
+            if observed is None and post.observed_at:
+                observed = _parse_refresh_time(post.observed_at)
         else:
             observed = _parse_refresh_time(post.observed_at) if post.observed_at else None
         if observed is None:
