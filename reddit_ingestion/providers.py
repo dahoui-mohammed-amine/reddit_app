@@ -1098,11 +1098,18 @@ class BrightDataProvider(HttpProviderBase):
         return None
 
     @staticmethod
-    def _response_shape(payload: Any) -> str:
+    def _snapshot_id(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        snapshot_id = payload.get("snapshot_id")
+        return snapshot_id if isinstance(snapshot_id, str) and snapshot_id.strip() else None
+
+    @classmethod
+    def _response_shape(cls, payload: Any) -> str:
         if isinstance(payload, list):
             return "array"
         if isinstance(payload, dict):
-            if payload.get("snapshot_id"):
+            if cls._snapshot_id(payload) is not None:
                 return "snapshot"
             return "object"
         return type(payload).__name__
@@ -1117,7 +1124,7 @@ class BrightDataProvider(HttpProviderBase):
             return payload, [], "array"
         if not isinstance(payload, dict):
             return None, [], cls._response_shape(payload)
-        if payload.get("snapshot_id"):
+        if cls._snapshot_id(payload) is not None:
             return None, [], "snapshot"
         return None, [], "object"
 
@@ -1355,6 +1362,7 @@ class BrightDataProvider(HttpProviderBase):
             and not self._error_matches(item, None)
             and not any(self._error_matches(item, target_url) for target_url in batch_urls)
         ]
+        provider_error_count = len(errors) + (1 if error is not None else 0)
         for key, raw_items in by_subreddit.items():
             subreddit = next(item for item in batch if self._subreddit_key(item) == key)
             target_url = f"https://www.reddit.com/r/{subreddit}/"
@@ -1391,11 +1399,11 @@ class BrightDataProvider(HttpProviderBase):
                 "fetched_at": fetched_at,
                 "requested_inputs": len(batch),
                 "returned_records": returned_count,
-                "provider_error_count": len(errors),
+                "provider_error_count": provider_error_count,
                 "accounting": {
                     "requested_inputs": len(batch),
                     "returned_records": returned_count,
-                    "provider_error_count": len(errors),
+                    "provider_error_count": provider_error_count,
                     "request_units": 1,
                     "billing_semantics": "undocumented",
                 },
@@ -1529,11 +1537,37 @@ class BrightDataProvider(HttpProviderBase):
             if raw_items is None:
                 gaps.extend(Gap("post", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=f"malformed provider payload: expected a JSON array, got {shape}") for post, _ in batch)
                 continue
-            malformed_items = [item for item in raw_items if not isinstance(item, Mapping)]
+            identity_keys = ("id", "post_id", "fullname", "name")
+            malformed_items = [
+                item
+                for item in raw_items
+                if not isinstance(item, Mapping) or ("error" not in item and not any(key in item for key in identity_keys))
+            ]
             malformed_item_count += len(malformed_items)
-            gaps.extend(Gap("post", "provider_error", detail="malformed provider payload: refresh item is not an object") for _ in malformed_items)
-            output_records = [item for item in raw_items if isinstance(item, Mapping) and not ("error" in item and not any(key in item for key in ("id", "post_id", "fullname", "name")))]
-            provider_errors = errors + [item for item in raw_items if isinstance(item, Mapping) and "error" in item and not any(key in item for key in ("id", "post_id", "fullname", "name"))]
+            gaps.extend(
+                Gap(
+                    "post",
+                    "provider_error",
+                    detail=(
+                        "malformed provider payload: refresh item is not an object"
+                        if not isinstance(item, Mapping)
+                        else "malformed provider payload: refresh record is missing post identity"
+                    ),
+                )
+                for item in malformed_items
+            )
+            output_records = [
+                item
+                for item in raw_items
+                if isinstance(item, Mapping)
+                and any(key in item for key in identity_keys)
+                and not ("error" in item and not any(key in item for key in identity_keys))
+            ]
+            provider_errors = errors + [
+                item
+                for item in raw_items
+                if isinstance(item, Mapping) and "error" in item and not any(key in item for key in identity_keys)
+            ]
             self._update_accounting(request_records, returned_records=len(output_records), provider_error_count=len(provider_errors) + len(malformed_items))
             returned_by_post: dict[str, Mapping[str, Any]] = {}
             for raw in output_records:
@@ -1549,10 +1583,9 @@ class BrightDataProvider(HttpProviderBase):
             for post, requested_url in batch:
                 raw = returned_by_post.get(post.post_id)
                 target_errors = [item for item in provider_errors if self._error_matches(item, requested_url)]
+                gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=item) for item in target_errors)
                 if raw is None:
-                    if target_errors:
-                        gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=item) for item in target_errors)
-                    else:
+                    if not target_errors:
                         gaps.append(Gap("post", "not_returned", entity_id=post.post_id, subreddit=post.subreddit, detail="Bright Data returned no record for this requested URL"))
                     continue
                 try:

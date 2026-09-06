@@ -419,7 +419,7 @@ class BrightDataTests(unittest.TestCase):
 
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
-                return [valid, None], HttpResponse(200, {}, b""), "request"
+                return [valid, None, {}], HttpResponse(200, {}, b""), "request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
             cfg = config(Path(directory))
@@ -429,10 +429,28 @@ class BrightDataTests(unittest.TestCase):
 
         self.assertEqual([post.post_id for post in result.posts], ["p"])
         self.assertTrue(any(gap.reason == "provider_error" and "not an object" in (gap.detail or "") for gap in result.gaps))
+        self.assertTrue(any(gap.reason == "provider_error" and "missing post identity" in (gap.detail or "") for gap in result.gaps))
         self.assertTrue(result.metadata["request_failed"])
-        self.assertEqual(result.metadata["malformed_record_count"], 1)
+        self.assertEqual(result.metadata["malformed_record_count"], 2)
         self.assertEqual(result.request_records[0].metadata["accounting"]["returned_records"], 1)
-        self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
+        self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 2)
+
+    def test_refresh_reports_provider_errors_alongside_valid_records(self) -> None:
+        valid = post_record("smallbusiness")
+        provider_error = {"url": valid["url"], "error": "partial provider failure"}
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [valid, provider_error], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertEqual([post.post_id for post in result.posts], ["p"])
+        self.assertTrue(any(gap.reason == "provider_error" and gap.entity_id == "p" for gap in result.gaps))
 
     def test_202_snapshot_is_a_safe_unsupported_result_without_followup(self) -> None:
         calls: list[int] = []
@@ -488,7 +506,7 @@ class BrightDataTests(unittest.TestCase):
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
                 return self.payload, HttpResponse(202, {}, b""), "request"
 
-        for payload in ({"data": []}, {"records": []}, {"errors": []}):
+        for payload in ({"data": []}, {"records": []}, {"errors": []}, {"snapshot_id": True}):
             with self.subTest(payload=payload):
                 Client.payload = payload
                 with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
@@ -521,6 +539,8 @@ class BrightDataTests(unittest.TestCase):
             self.assertEqual(metadata["raw_payload"], {"error": f"error-{status}"})
             self.assertEqual(metadata["accounting"]["requested_inputs"], 2)
             self.assertEqual(metadata["accounting"]["returned_records"], 0)
+            self.assertEqual(result.metadata["provider_error_count"], 1, status)
+            self.assertEqual(result.metadata["accounting"]["provider_error_count"], 1, status)
 
     def test_cursor_and_full_comments_are_explicitly_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
