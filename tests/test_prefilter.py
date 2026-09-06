@@ -436,6 +436,39 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(short_decision.reason_codes, ("TEXT_TOO_SHORT",))
         self.assertEqual(short_decision.metadata["text_length"], 3)
 
+    def test_post_titles_are_content_sentinels_but_authors_are_not(self) -> None:
+        deleted_title = RawRecord(
+            "post",
+            {"id": "post-deleted-title", "title": "[deleted]"},
+            self.lineage,
+        )
+        removed_title = RawRecord(
+            "post",
+            {"id": "post-removed-title", "title": "[removed]"},
+            self.lineage,
+        )
+        visible_comment = RawRecord(
+            "comment",
+            {
+                "id": "comment-deleted-author",
+                "link_id": "post-parent",
+                "author": "[deleted]",
+                "body": "A visible comment with enough text",
+            },
+            self.lineage,
+        )
+
+        decisions = Prefilter().evaluate(
+            (deleted_title, removed_title, visible_comment)
+        ).decisions
+
+        self.assertEqual(decisions[0].status, "rejected")
+        self.assertEqual(decisions[0].reason_codes, ("DELETED_CONTENT",))
+        self.assertEqual(decisions[1].status, "rejected")
+        self.assertEqual(decisions[1].reason_codes, ("REMOVED_CONTENT",))
+        self.assertEqual(decisions[2].status, "accepted")
+        self.assertEqual(decisions[2].reason_codes, ("ACCEPTED",))
+
     def test_fixture_adapter_rejects_an_ambiguous_top_level_shape(self) -> None:
         with self.assertRaises(AdapterError):
             records_from_fixture({"listings": []})

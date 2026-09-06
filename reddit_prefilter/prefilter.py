@@ -236,12 +236,14 @@ def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, s
     return result, "raw" if _present(raw_value) else "adapter_context", tuple(reasons)
 
 
-def _content_state(raw: Mapping[str, Any]) -> tuple[bool, bool]:
-    authors = [raw[key] for key in ("author", "author_username") if key in raw]
+def _content_state(raw: Mapping[str, Any], record_type: str) -> tuple[bool, bool]:
     deleted_markers = [raw[key] for key in ("deleted", "is_deleted") if key in raw]
     removed_markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
-    deleted_content = [raw[key] for key in ("body", "bodyText", "selftext", "text") if key in raw]
-    removed_content = [raw[key] for key in ("body", "bodyText", "selftext", "text") if key in raw]
+    content_fields = ("body", "bodyText", "selftext", "text")
+    if record_type == "post":
+        content_fields = ("title", *content_fields)
+    deleted_content = [raw[key] for key in content_fields if key in raw]
+    removed_content = [raw[key] for key in content_fields if key in raw]
 
     def flagged(value: Any) -> bool:
         if isinstance(value, bool):
@@ -260,7 +262,7 @@ def _content_state(raw: Mapping[str, Any]) -> tuple[bool, bool]:
         )
 
     deleted = any(flagged(value) for value in deleted_markers) or marked(
-        authors + deleted_content, {"[deleted]", "deleted"}
+        deleted_content, {"[deleted]", "deleted"}
     )
     removed = any(flagged(value) for value in removed_markers) or marked(
         removed_content, {"[removed]", "removed"}
@@ -420,7 +422,7 @@ class Prefilter:
         reasons: set[str] = set()
         if duplicate_of is not None:
             reasons.add("DUPLICATE_RECORD")
-        deleted, removed = _content_state(raw)
+        deleted, removed = _content_state(raw, record_type)
         metadata["content_state"] = {"deleted": deleted, "removed": removed}
         if deleted:
             reasons.add("DELETED_CONTENT")
