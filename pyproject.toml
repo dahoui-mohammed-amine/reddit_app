@@ -1,0 +1,13 @@
+[project]
+name = "reddit-prefilter"
+version = "0.1.0"
+description = "Evidence-preserving deterministic Reddit pre-filter boundary"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["reddit_prefilter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

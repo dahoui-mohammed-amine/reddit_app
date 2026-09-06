@@ -1,0 +1,201 @@
+{
+  "records": [
+    {
+      "record_type": "post",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:00Z",
+        "source_url": "fixture://freelance/new",
+        "request_id": "fixture-1",
+        "run_id": "run-1",
+        "response_status": 200,
+        "metadata": {"page": 1}
+      },
+      "raw": {
+        "id": "post-accepted",
+        "name": "t3_post-accepted",
+        "subreddit": "freelance",
+        "title": "Pricing a small project",
+        "selftext": "How should an independent worker price a fixed scope?"
+      }
+    },
+    {
+      "record_type": "comment",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:01Z",
+        "source_url": "fixture://freelance/comments",
+        "request_id": "fixture-2"
+      },
+      "raw": {
+        "id": "comment-accepted",
+        "name": "t1_comment-accepted",
+        "link_id": "t3_post-accepted",
+        "parent_id": "t3_post-accepted",
+        "body": "Explain the scope and assumptions before quoting."
+      },
+      "subreddit_context": "freelance"
+    },
+    {
+      "record_type": "post",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:02Z",
+        "source_url": "fixture://freelance/new",
+        "request_id": "fixture-3"
+      },
+      "raw": {
+        "id": "post-deleted",
+        "subreddit": "freelance",
+        "title": "A post that was deleted",
+        "selftext": "[deleted]",
+        "deleted": true
+      }
+    },
+    {
+      "record_type": "comment",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:03Z",
+        "source_url": "fixture://freelance/comments",
+        "request_id": "fixture-4"
+      },
+      "raw": {
+        "id": "comment-removed",
+        "link_id": "t3_post-accepted",
+        "parent_id": "t3_post-accepted",
+        "body": "[removed]",
+        "removed_by_category": "moderator"
+      },
+      "subreddit_context": "freelance"
+    },
+    {
+      "record_type": "post",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:04Z",
+        "source_url": "fixture://freelance/new",
+        "request_id": "fixture-5"
+      },
+      "raw": {
+        "id": "post-accepted",
+        "subreddit": "freelance",
+        "title": "Same ID, second observation",
+        "selftext": "This raw observation must remain in the audit output."
+      }
+    },
+    {
+      "record_type": "post",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:05Z",
+        "source_url": "fixture://freelance/new",
+        "request_id": "fixture-6"
+      },
+      "raw": {
+        "id": "post-short",
+        "subreddit": "freelance",
+        "title": "tiny"
+      }
+    },
+    {
+      "record_type": "comment",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:06Z",
+        "source_url": "fixture://freelance/comments",
+        "request_id": "fixture-7"
+      },
+      "raw": {
+        "id": "comment-spam",
+        "link_id": "t3_post-accepted",
+        "parent_id": "t3_post-accepted",
+        "body": "Buy now and click here for free money!"
+      },
+      "subreddit_context": "freelance"
+    },
+    {
+      "record_type": "post",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:07Z",
+        "source_url": "fixture://other/new",
+        "request_id": "fixture-8"
+      },
+      "raw": {
+        "id": "post-outside",
+        "subreddit": "other",
+        "title": "A sufficiently detailed post",
+        "selftext": "This is outside the configured subreddit scope."
+      }
+    },
+    {
+      "record_type": "post",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:08Z",
+        "source_url": "fixture://freelance/new",
+        "request_id": "fixture-9"
+      },
+      "raw": {
+        "subreddit": "freelance",
+        "title": "No stable identifier",
+        "selftext": "This record cannot be safely joined."
+      }
+    },
+    {
+      "record_type": "comment",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:09Z",
+        "source_url": "fixture://freelance/comments",
+        "request_id": "fixture-10"
+      },
+      "raw": {
+        "id": "t3_wrong_prefix",
+        "link_id": "t3_post-accepted",
+        "body": "This identifier belongs to a post, not a comment."
+      },
+      "subreddit_context": "freelance"
+    },
+    {
+      "record_type": "comment",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:10Z",
+        "source_url": "fixture://freelance/comments",
+        "request_id": "fixture-11"
+      },
+      "raw": {
+        "id": "comment-no-link",
+        "parent_id": "t3_post-accepted",
+        "body": "The parent post relationship is not available."
+      },
+      "subreddit_context": "freelance"
+    },
+    {
+      "record_type": "post",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:11Z",
+        "source_url": "fixture://unknown/new",
+        "request_id": "fixture-12"
+      },
+      "raw": {
+        "id": "post-no-scope",
+        "title": "No subreddit was supplied",
+        "selftext": "The configured scope cannot be checked safely."
+      }
+    },
+    {
+      "record_type": "post",
+      "lineage": {
+        "provider": "fixture",
+        "observed_at": "2026-09-05T00:00:12Z",
+        "source_url": "fixture://freelance/new",
+        "request_id": "fixture-13"
+      },
+      "raw": ["not", "an", "object"]
+    }
+  ]
+}
