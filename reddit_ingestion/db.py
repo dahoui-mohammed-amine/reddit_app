@@ -221,7 +221,8 @@ class Database:
         for gap in page.gaps:
             self._save_gap(run_id, provider, gap, page.observed_at, subreddit=subreddit)
         blocked = page.metadata.get("blocked") or any(gap.entity_type == "listing" and gap.reason == "blocked" for gap in page.gaps)
-        provider_incomplete = listing_status in {"truncated", "unknown"} or page.metadata.get("checkpoint_deferred")
+        listing_failed = any(gap.entity_type == "listing" and gap.reason == "provider_error" for gap in page.gaps)
+        provider_incomplete = listing_status in {"truncated", "unknown"} or page.metadata.get("checkpoint_deferred") or listing_failed
         if not page.metadata.get("request_failed") and not page.metadata.get("checkpoint_deferred") and not blocked and not provider_incomplete:
             self.connection.execute(
                 "INSERT INTO checkpoints(subreddit, cursor, page_count, observed_at, provider, source_url) VALUES (?, ?, 1, ?, ?, ?) ON CONFLICT(subreddit) DO UPDATE SET cursor=excluded.cursor, page_count=checkpoints.page_count+1, observed_at=excluded.observed_at, provider=excluded.provider, source_url=excluded.source_url",
@@ -301,7 +302,7 @@ class Database:
         self.connection.execute(
             f"""INSERT INTO posts(post_id, fullname, subreddit, title, body, author, permalink, url, created_at, score, ups, upvote_ratio, num_comments, archived, locked, deleted, removed, observed_at, refresh_until, provider, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(excluded.created_at, posts.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), {archived_update}, {locked_update}, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, refresh_until=CASE WHEN excluded.created_at IS NOT NULL THEN excluded.refresh_until ELSE COALESCE(posts.refresh_until, excluded.refresh_until) END, provider=excluded.provider, updated_at=excluded.updated_at""",
+            ON CONFLICT(post_id) DO UPDATE SET fullname=excluded.fullname, subreddit=COALESCE(excluded.subreddit, posts.subreddit), title=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.title, posts.title) END, body=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.body, posts.body) END, author=CASE WHEN {clear_post_content} THEN NULL ELSE COALESCE(excluded.author, posts.author) END, permalink=COALESCE(excluded.permalink, posts.permalink), url=COALESCE(excluded.url, posts.url), created_at=COALESCE(posts.created_at, excluded.created_at), score=COALESCE(excluded.score, posts.score), ups=COALESCE(excluded.ups, posts.ups), upvote_ratio=COALESCE(excluded.upvote_ratio, posts.upvote_ratio), num_comments=COALESCE(excluded.num_comments, posts.num_comments), {archived_update}, {locked_update}, {deleted_update}, {removed_update}, observed_at=excluded.observed_at, refresh_until=CASE WHEN posts.created_at IS NULL AND excluded.created_at IS NOT NULL THEN excluded.refresh_until ELSE COALESCE(posts.refresh_until, excluded.refresh_until) END, provider=excluded.provider, updated_at=excluded.updated_at""",
             (post.post_id, post.fullname or f"t3_{post.post_id}", post.subreddit, title, body, author, post.permalink, post.url, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, int(post.archived), int(post.locked), deleted, removed, post.observed_at, post.refresh_until, provider, post.observed_at),
         )
 
@@ -334,10 +335,13 @@ class Database:
         cache_observed_at = request.cache_observed_at if request else result.cache_observed_at
         result_metadata = result.metadata if result_metadata is None else result_metadata
         metadata = {**request.metadata, **result_metadata} if request else result_metadata
-        source_created_at = post.created_at
-        if not source_created_at:
-            row = self.connection.execute("SELECT created_at FROM posts WHERE post_id = ?", (post.post_id,)).fetchone()
-            source_created_at = row[0] if row else None
+        row = self.connection.execute("SELECT created_at FROM posts WHERE post_id = ?", (post.post_id,)).fetchone()
+        source_created_at = row[0] if row else post.created_at
+        if source_created_at is not None:
+            self.connection.execute(
+                "UPDATE post_observations SET source_created_at = ? WHERE post_id = ? AND source_created_at IS NULL",
+                (source_created_at, post.post_id),
+            )
         self.connection.execute(
             "INSERT INTO post_observations(post_id, observed_at, provider, source_created_at, score, ups, upvote_ratio, num_comments, response_status, request_id, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (post.post_id, post.observed_at, provider, source_created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, response_status, request_id, cache_status, cache_observed_at, json.dumps(metadata, sort_keys=True)),

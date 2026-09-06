@@ -63,6 +63,9 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(post.comments[0].parent_id, "t3_abc")
         self.assertEqual(post.score, 7)
         self.assertEqual(post.num_comments, 2)
+        fallback = parse_post({"id": "fallback", "created_at_iso": None, "created_utc": "2026-09-01T00:00:00Z", "num_comments": None, "commentCount": 2})
+        self.assertEqual(fallback.created_at, "2026-09-01T00:00:00Z")
+        self.assertEqual(fallback.num_comments, 2)
 
     def test_normalization_rejects_empty_and_conflicting_ids(self) -> None:
         with self.assertRaises(ValueError):
@@ -85,6 +88,8 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(linked.post_id, "p1")
         with self.assertRaises(ValueError):
             parse_comment({"id": "c", "link_id": "t3_p2"}, post=post, observed_at=post.observed_at)
+        with self.assertRaises(ValueError):
+            parse_comment({"id": "c", "parent_id": "t3_p2"}, post=post, observed_at=post.observed_at)
 
     def test_normalization_recognizes_deleted_content_markers(self) -> None:
         post = parse_post({"id": "deleted", "author": None, "selftext": "[deleted]"})
@@ -686,8 +691,38 @@ class IngestionTests(unittest.TestCase):
             partial = PostSnapshot("p", "t3_p", "freelance", observed_at=observed, score=3)
             with db.transaction():
                 db.save_refresh(run_id, "fixture", RefreshResult([partial], observed, "refresh", 200))
+            changed = PostSnapshot("p", "t3_p", "freelance", created_at="2026-02-01T00:00:00Z", observed_at=observed, score=4)
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", RefreshResult([changed], observed, "refresh", 200))
+            current_source = db.connection.execute("SELECT created_at FROM posts WHERE post_id='p'").fetchone()[0]
             source_times = [row[0] for row in db.connection.execute("SELECT source_created_at FROM post_observations WHERE post_id='p' ORDER BY observation_id")]
-            self.assertEqual(source_times, [source_time, source_time])
+            self.assertEqual(current_source, source_time)
+            self.assertEqual(source_times, [source_time, source_time, source_time])
+            db.close()
+
+    def test_later_source_timestamp_backfills_prior_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([PostSnapshot("p", "t3_p", "freelance", observed_at=observed)], None, None, observed, "fixture://p", 200, "request"))
+                db.save_page(run_id, "fixture", "freelance", PageResult([PostSnapshot("p", "t3_p", "freelance", created_at="2026-09-01T00:00:00Z", observed_at=observed)], None, None, observed, "fixture://p", 200, "request"))
+            source_times = [row[0] for row in db.connection.execute("SELECT source_created_at FROM post_observations WHERE post_id='p' ORDER BY observation_id")]
+            self.assertEqual(source_times, ["2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"])
+            db.close()
+
+    def test_listing_failure_gap_defers_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            page = PageResult([], None, "c2", observed, "fixture://freelance", 200, "request", gaps=[Gap("listing", "provider_error", subreddit="freelance")])
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", page)
+            self.assertIsNone(db.checkpoint("freelance"))
             db.close()
 
     def test_cache_observation_timestamp_is_persisted_on_request(self) -> None:
@@ -1167,10 +1202,11 @@ class IngestionTests(unittest.TestCase):
                 }, HttpResponse(200, {}, b""), "expansion-request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
-            cfg = config(Path(directory), provider="fetchlayer")
+            cfg = replace(config(Path(directory), provider="fetchlayer"), max_discovery_pages=5)
             result = FetchLayerProvider(cfg, client=Client()).discover("freelance", None, cfg)
             post = result.posts[0]
             self.assertEqual((post.score, post.ups, post.upvote_ratio, post.num_comments), (7, 8, 0.9, 2))
+            self.assertEqual(result.request_records[0].request_units, 1)
             self.assertTrue(result.metadata["comments_expanded"])
             self.assertFalse(any(gap.reason == "unexpanded" for gap in result.gaps))
 

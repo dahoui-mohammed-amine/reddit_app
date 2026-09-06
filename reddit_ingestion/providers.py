@@ -699,7 +699,7 @@ class FetchLayerProvider(HttpProviderBase):
         if blocked:
             gaps.append(Gap("listing", "blocked", subreddit=subreddit, detail=str(payload.get("blockReason"))))
         cache_status, cache_observed_at = _cache_info(payload)
-        pages = payload.get("pagesRequested") or payload.get("pagesScraped") or config.max_discovery_pages
+        pages = payload.get("pagesRequested") or payload.get("pagesScraped") or request_payload["pages"]
         try:
             request_units = max(1, int(pages))
         except (TypeError, ValueError):

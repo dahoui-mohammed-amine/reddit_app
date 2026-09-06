@@ -13,7 +13,7 @@ def utc_now() -> str:
 
 def _value(raw: Mapping[str, Any], *keys: str) -> Any:
     for key in keys:
-        if key in raw:
+        if key in raw and raw[key] is not None:
             return raw[key]
     return None
 
@@ -145,12 +145,15 @@ def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed
     linked_post_id = _comment_link_id(raw)
     if post is not None and linked_post_id is not None and linked_post_id != post.post_id:
         raise ValueError("comment post link disagrees with requested post")
+    parent_id = _parent_id(raw)
+    if post is not None and parent_id and parent_id.startswith("t3_") and parent_id != f"t3_{post.post_id}":
+        raise ValueError("comment root parent disagrees with requested post")
     fullname = _text(_value(raw, "fullname", "name")) or f"t1_{cid}"
     return CommentSnapshot(
         comment_id=cid,
         fullname=fullname,
         post_id=post.post_id if post else linked_post_id,
-        parent_id=_parent_id(raw),
+        parent_id=parent_id,
         author=_text(_value(raw, "author", "author_username")),
         body=_text(_value(raw, "body", "bodyText", "text")),
         permalink=_relative_permalink(_text(_value(raw, "permalink", "url"))),
