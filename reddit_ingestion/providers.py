@@ -1189,11 +1189,19 @@ class BrightDataProvider(HttpProviderBase):
         else:
             return False
         target_reference = any(term in text for term in ("post", "submission", "comment", "content", "subreddit", "community"))
+        for key in ("url", "input", "requested_url", "original_url"):
+            value = error.get(key)
+            candidates = [value]
+            if isinstance(value, Mapping):
+                candidates.extend(value.get(name) for name in ("url", "input"))
+            if any(cls._absolute_reddit_url(candidate) is not None for candidate in candidates):
+                target_reference = True
+                break
         target_not_found = "not found" in text and target_reference
         target_marker = any(term in text for term in ("deleted", "removed", "private", "restricted", "unavailable"))
         if status == 404 or any(str(error.get(key)).strip() == "404" for key in ("status", "status_code", "code", "error_code")):
             return target_not_found or (target_reference and target_marker)
-        return target_not_found or target_marker
+        return target_reference and (target_not_found or target_marker)
 
     @classmethod
     def _provider_gap(cls, entity_type: str, *, entity_id: str | None, subreddit: str | None, error: Any, status: int | None = None) -> Gap:
@@ -1685,6 +1693,7 @@ class BrightDataProvider(HttpProviderBase):
                 provider_error_count=batch_provider_error_count + batch_downstream_provider_error_count,
             )
         primary = next((record for record in records if record.operation == "refresh"), None)
+        provider_error_count = sum(int(record.metadata.get("provider_error_count", 0)) for record in records)
         metadata = {
             "comments_mode": config.comments_mode,
             "comments_expanded": _comments_complete(gaps),
@@ -1695,8 +1704,8 @@ class BrightDataProvider(HttpProviderBase):
             "record_count": len(all_posts),
             "malformed_record_count": malformed_item_count,
             "malformed_response_count": malformed_response_count,
-            "provider_error_count": sum(int(record.metadata.get("provider_error_count", 0)) for record in records),
-            "request_failed": batch_request_failed or malformed_item_count > 0 or malformed_response_count > 0 or downstream_provider_error_count > 0,
+            "provider_error_count": provider_error_count,
+            "request_failed": batch_request_failed or provider_error_count > 0 or malformed_item_count > 0 or malformed_response_count > 0 or downstream_provider_error_count > 0,
         }
         return RefreshResult(
             all_posts,

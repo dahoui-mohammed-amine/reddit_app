@@ -542,6 +542,7 @@ class BrightDataTests(unittest.TestCase):
 
         self.assertEqual([post.post_id for post in result.posts], ["p"])
         self.assertTrue(any(gap.reason == "provider_error" and gap.entity_id == "p" for gap in result.gaps))
+        self.assertTrue(result.metadata["request_failed"])
 
     def test_refresh_reports_unmatched_provider_errors_at_batch_scope(self) -> None:
         unmatched = {"url": "https://www.reddit.com/r/other/comments/q/title/", "error": "provider failure"}
@@ -681,7 +682,7 @@ class BrightDataTests(unittest.TestCase):
 
     def test_refresh_http_error_marks_result_failed(self) -> None:
         def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
-            return HttpResponse(500, {}, b'{"error":"provider failure"}')
+            return HttpResponse(500, {}, b'{"error":"service unavailable"}')
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
             cfg = config(Path(directory))
@@ -691,6 +692,7 @@ class BrightDataTests(unittest.TestCase):
             )
 
         self.assertTrue(result.metadata["request_failed"])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
 
     def test_non_json_error_text_cannot_imply_unavailable(self) -> None:
         def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
