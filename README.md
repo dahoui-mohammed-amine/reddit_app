@@ -8,6 +8,7 @@ The checked-in configuration uses the fixture provider. It performs no network c
 
 ```sh
 uv sync
+uv run reddit-ingest run --config config.toml --dry-run
 uv run reddit-ingest status --config config.toml
 uv run reddit-ingest plan --config config.toml
 uv run reddit-ingest run --config config.toml --mode discover
@@ -15,6 +16,7 @@ uv run reddit-ingest run --config config.toml --mode refresh
 uv run reddit-ingest status --config config.toml
 ```
 
+`--dry-run` reports provider status and the estimated plan without network calls or ingestion writes.
 The SQLite database is `data/reddit.sqlite3` by default and is intentionally ignored by Git. The sample fixture covers `r/freelance`, `r/smallbusiness`, and `r/SaaS`, pagination, changing scores/comment counts, and comments.
 
 ## Configuration
@@ -23,8 +25,8 @@ Copy `config.example.toml` and edit the explicit `[ingestion]`, `[comments]`, an
 
 - `listing_limit` is capped at Reddit-style 100.
 - `refresh_interval_minutes` controls which stored posts are due for a later `refresh` pass.
-- `refresh_expiry_days` sets each post's refresh-until window from its source creation time; expired posts remain stored with their history but are no longer refreshed.
-- `comments.mode` is `bounded` or `full`. Bounded mode records explicit gaps when depth/limit truncates comments. Full mode is opt-in.
+- `refresh_expiry_days` sets each post's refresh-until window from its source creation time when available, falling back to observation time; expired posts remain stored with their history but are no longer refreshed.
+- `comments.mode` is `bounded` or `full`. Bounded mode records explicit gaps when depth/limit truncates comments. Full mode is opt-in; FetchLayer reports full expansion as unsupported.
 - `provider.min_request_interval_seconds` paces live requests before each attempt; retry backoff and provider retry-after values still apply.
 - `provider.name` is `fixture`, `redditapis`, or `fetchlayer`.
 
@@ -33,19 +35,19 @@ Copy `config.example.toml` and edit the explicit `[ingestion]`, `[comments]`, an
 The app contains configuration seams for the two researched low-cost providers, but does not claim live access:
 
 ```sh
-# RedditAPIs adapter; no call occurs unless the key exists and --allow-paid is supplied.
+# Edit config.toml first: [provider] name = "redditapis".
 export REDDITAPIS_API_KEY='...'
-uv run reddit-ingest plan --config config.toml
-uv run reddit-ingest run --config config.toml --allow-paid
+uv run reddit-ingest plan --config config.toml --mode discover
+uv run reddit-ingest run --config config.toml --mode discover --allow-paid
 
-# FetchLayer adapter
+# Edit config.toml first: [provider] name = "fetchlayer".
 export FETCHLAYER_API_KEY='...'
-uv run reddit-ingest run --config config.toml --allow-paid
+uv run reddit-ingest run --config config.toml --mode discover --allow-paid
 ```
 
-Change `provider.name` before using either adapter. Missing credentials are reported as a provider-access error. The application never automatically falls back from one provider to another, and it never silently expands every comment. Review the plan and provider terms first; no real secrets belong in this repository.
+No call occurs unless the selected provider's key exists and `--allow-paid` is supplied. Missing credentials are reported as a provider-access error. The application never automatically falls back from one provider to another, and it never silently expands every comment. Review the plan and provider terms first; no real secrets belong in this repository.
 
-The RedditAPIs adapter uses the documented subreddit listing and up-to-100 `t3_` fullname batch refresh shape. The FetchLayer adapter uses subreddit-post and one-post-URL endpoints. Provider responses retain cache/status metadata where supplied. Score and comment-count changes are observations, not exact vote-arrival rates.
+The RedditAPIs adapter uses the documented subreddit listing and up-to-100 `t3_` fullname batch refresh shape. The FetchLayer adapter uses subreddit-post and one-post-URL endpoints; its full comment expansion is unsupported and records an explicit unexpanded gap while still refreshing post metrics. Provider responses retain cache/status metadata where supplied. Score and comment-count changes are observations, not exact vote-arrival rates.
 
 ## Data and deletion posture
 
@@ -77,4 +79,4 @@ Tests are fixture-driven and require no credentials or network calls:
 uv run python -m unittest discover -s tests -v
 ```
 
-They cover normalization, cursor resume, idempotency, historical observations, bounded comment gaps, deletion/update clearing, retryable provider errors, and the live cost/access gate.
+They cover normalization, cursor resume, idempotency, historical observations, bounded comment gaps, deletion/update clearing, retryable provider errors, and the provider access/cost gate.
