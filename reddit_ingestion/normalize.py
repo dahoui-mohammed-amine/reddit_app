@@ -83,15 +83,15 @@ def _relative_permalink(value: str | None) -> str | None:
 
 
 def _deleted(raw: Mapping[str, Any]) -> bool:
-    authors = [raw[key] for key in ("author", "author_username", "user_posted") if key in raw]
+    authors = [raw[key] for key in ("author", "author_username") if key in raw]
     markers = [raw[key] for key in ("deleted", "is_deleted") if key in raw]
-    contents = [raw[key] for key in ("body", "bodyText", "selftext", "text", "description", "comment") if key in raw]
+    contents = [raw[key] for key in ("body", "bodyText", "selftext", "text") if key in raw]
     return bool(any(markers)) or any(value in {"[deleted]", "deleted"} for value in authors + contents)
 
 
 def _removed(raw: Mapping[str, Any]) -> bool:
     markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
-    contents = [raw[key] for key in ("body", "bodyText", "selftext", "text", "description", "comment") if key in raw]
+    contents = [raw[key] for key in ("body", "bodyText", "selftext", "text") if key in raw]
     return bool(any(markers)) or any(value in {"[removed]", "removed"} for value in contents)
 
 
@@ -195,8 +195,8 @@ def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed
         removed=_removed(raw),
         depth=_int(_value(raw, "depth")),
         observed_at=observed_at,
-        deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "user_posted", "body", "bodyText", "text", "comment"), {"[deleted]", "deleted"}),
-        removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "text", "comment"), {"[removed]", "removed"}),
+        deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "text"), {"[deleted]", "deleted"}),
+        removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "text"), {"[removed]", "removed"}),
     )
 
 
@@ -230,8 +230,8 @@ def parse_post(
         deleted=_deleted(raw),
         removed=_removed(raw),
         observed_at=observed,
-        deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "user_posted", "body", "bodyText", "selftext", "text", "description"), {"[deleted]", "deleted"}),
-        removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "selftext", "description"), {"[removed]", "removed"}),
+        deletion_known=_state_known(raw, ("deleted", "is_deleted"), ("author", "author_username", "body", "bodyText", "selftext", "text"), {"[deleted]", "deleted"}),
+        removal_known=_state_known(raw, ("removed", "is_removed", "removed_by_category"), ("body", "bodyText", "selftext"), {"[removed]", "removed"}),
         archived_known=raw.get("archived") not in (None, ""),
         locked_known=raw.get("locked") not in (None, ""),
     )

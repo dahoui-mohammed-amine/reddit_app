@@ -9,7 +9,8 @@ from unittest import mock
 
 from reddit_ingestion.config import Config
 from reddit_ingestion.db import Database
-from reddit_ingestion.models import PostSnapshot
+from reddit_ingestion.models import PageResult, PostSnapshot
+from reddit_ingestion.normalize import parse_post
 from reddit_ingestion.providers import BrightDataProvider, HttpResponse, JsonClient
 from reddit_ingestion.runner import run_once
 
@@ -135,6 +136,46 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(post.observed_at, result.metadata["fetched_at"])
         self.assertEqual(result.request_records[0].metadata["raw_payload"], [raw])
         self.assertEqual(result.request_records[0].metadata["response_shape"], "array")
+
+    def test_brightdata_deletion_like_fields_remain_report_only(self) -> None:
+        raw = post_record("smallbusiness")
+        raw.update({"description": "[deleted]", "user_posted": "[removed]"})
+        raw["comments"] = [{
+            "comment_id": "c",
+            "post_id": "p",
+            "user_posted": "[deleted]",
+            "comment": "[removed]",
+            "parent_id": "t3_p",
+        }]
+        post = parse_post(raw, default_subreddit="smallbusiness", observed_at=OBSERVED)
+
+        self.assertFalse(post.deleted)
+        self.assertFalse(post.removed)
+        self.assertFalse(post.deletion_known)
+        self.assertFalse(post.removal_known)
+        self.assertFalse(post.comments[0].deleted)
+        self.assertFalse(post.comments[0].removed)
+        self.assertFalse(post.comments[0].deletion_known)
+        self.assertFalse(post.comments[0].removal_known)
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "reddit.sqlite3")
+            try:
+                run_id = db.start_run("brightdata", "discover", {}, OBSERVED)
+                with db.transaction():
+                    db.save_page(
+                        run_id,
+                        "brightdata",
+                        "smallbusiness",
+                        PageResult([post], None, None, OBSERVED, post.url, 200, "brightdata", metadata={"comments_expanded": True}),
+                    )
+                saved_post = db.connection.execute("SELECT title, body, author, deleted, removed FROM posts WHERE post_id='p'").fetchone()
+                saved_comment = db.connection.execute("SELECT body, author, deleted, removed FROM comments WHERE comment_id='c'").fetchone()
+            finally:
+                db.close()
+
+        self.assertEqual(tuple(saved_post), ("A post", "[deleted]", "[removed]", 0, 0))
+        self.assertEqual(tuple(saved_comment), ("[removed]", "[deleted]", 0, 0))
 
     def test_sparse_records_are_valid_but_deleted_like_partial_errors_are_unavailable(self) -> None:
         sparse = {"post_id": "sparse", "url": "https://www.reddit.com/r/smallbusiness/comments/sparse/title/", "num_comments": 0}
