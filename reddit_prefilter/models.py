@@ -70,17 +70,47 @@ class SourceLineage:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "metadata", _freeze(self.metadata))
+        for field_name in (
+            "provider",
+            "observed_at",
+            "source_url",
+            "request_id",
+            "run_id",
+            "response_status",
+            "cache_status",
+            "metadata",
+        ):
+            object.__setattr__(self, field_name, _freeze(getattr(self, field_name)))
+
+    def is_valid(self) -> bool:
+        return (
+            isinstance(self.provider, str)
+            and bool(self.provider.strip())
+            and isinstance(self.observed_at, str)
+            and bool(self.observed_at.strip())
+            and (self.source_url is None or isinstance(self.source_url, str))
+            and (self.request_id is None or isinstance(self.request_id, str))
+            and (self.run_id is None or isinstance(self.run_id, str))
+            and (
+                self.response_status is None
+                or (
+                    isinstance(self.response_status, int)
+                    and not isinstance(self.response_status, bool)
+                )
+            )
+            and (self.cache_status is None or isinstance(self.cache_status, str))
+            and isinstance(self.metadata, Mapping)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "provider": deepcopy(self.provider),
-            "observed_at": deepcopy(self.observed_at),
-            "source_url": deepcopy(self.source_url),
-            "request_id": deepcopy(self.request_id),
-            "run_id": deepcopy(self.run_id),
-            "response_status": deepcopy(self.response_status),
-            "cache_status": deepcopy(self.cache_status),
+            "provider": _thaw(self.provider),
+            "observed_at": _thaw(self.observed_at),
+            "source_url": _thaw(self.source_url),
+            "request_id": _thaw(self.request_id),
+            "run_id": _thaw(self.run_id),
+            "response_status": _thaw(self.response_status),
+            "cache_status": _thaw(self.cache_status),
             "metadata": _thaw(self.metadata),
         }
 

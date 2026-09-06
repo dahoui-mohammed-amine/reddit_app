@@ -356,12 +356,7 @@ class Prefilter:
             return self._decision(record, evidence_id, raw_sha256, None, structural, lineage, metadata), None
         if lineage is None:
             structural.add("MISSING_SOURCE_LINEAGE")
-        elif not isinstance(lineage, SourceLineage) or (
-            not isinstance(lineage.provider, str)
-            or not lineage.provider.strip()
-            or not isinstance(lineage.observed_at, str)
-            or not lineage.observed_at.strip()
-        ):
+        elif not isinstance(lineage, SourceLineage) or not lineage.is_valid():
             structural.add("INVALID_SOURCE_LINEAGE")
         identity = _identity(raw, record_type)
         structural.update(identity.reasons)

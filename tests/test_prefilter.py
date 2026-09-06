@@ -401,6 +401,43 @@ class PrefilterTests(unittest.TestCase):
                         }
                     )
 
+    def test_fixture_rejects_invalid_optional_lineage_fields(self) -> None:
+        invalid_lineage = {
+            "provider": "fixture",
+            "observed_at": "2026-09-05T00:00:00Z",
+            "source_url": [],
+        }
+        with self.assertRaises(AdapterError):
+            records_from_fixture(
+                {
+                    "records": [
+                        {
+                            "record_type": "post",
+                            "lineage": invalid_lineage,
+                            "raw": {"id": "post-invalid-optional-lineage"},
+                        }
+                    ]
+                }
+            )
+
+    def test_invalid_direct_lineage_is_snapshotted_and_incomplete(self) -> None:
+        source_url = ["fixture://source"]
+        lineage = SourceLineage(
+            provider="fixture",
+            observed_at="2026-09-05T00:00:00Z",
+            source_url=source_url,
+        )
+        result = Prefilter().evaluate(
+            (RawRecord("post", {"id": "post-invalid-source-url", "title": "Enough"}, lineage),)
+        )
+        before = result.to_dict()
+
+        source_url.append("mutated")
+
+        self.assertEqual(result.decisions[0].status, "incomplete")
+        self.assertEqual(result.decisions[0].reason_codes, ("INVALID_SOURCE_LINEAGE",))
+        self.assertEqual(result.to_dict(), before)
+
     def test_text_content_detects_removed_markers_and_normalizes_whitespace(self) -> None:
         removed = RawRecord(
             "post",
