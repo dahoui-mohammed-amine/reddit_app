@@ -414,6 +414,21 @@ class BrightDataTests(unittest.TestCase):
                 self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
                 self.assertTrue(result.metadata["checkpoint_deferred"])
 
+    def test_discovery_requires_a_usable_reddit_post_url(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [{"post_id": "p", "community_name": "smallbusiness"}], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+        self.assertEqual(result.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+        self.assertTrue(result.metadata["checkpoint_deferred"])
+        self.assertEqual(result.request_records[0].metadata["accounting"]["returned_records"], 1)
+        self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
+
     def test_refresh_retains_valid_records_and_reports_malformed_items(self) -> None:
         valid = post_record("smallbusiness")
 
@@ -518,6 +533,26 @@ class BrightDataTests(unittest.TestCase):
                 self.assertFalse(any(gap.reason == "unsupported" for gap in page.gaps))
                 self.assertTrue(page.metadata["checkpoint_deferred"])
                 self.assertEqual(page.request_records[0].metadata["raw_payload"], payload)
+                self.assertEqual(page.request_records[0].metadata["accounting"]["provider_error_count"], 1)
+
+    def test_refresh_malformed_envelopes_account_provider_errors(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return {"data": []}, HttpResponse(self.status, {}, b""), "request"
+
+        for status in (200, 202):
+            with self.subTest(status=status):
+                Client.status = status
+                with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+                    cfg = config(Path(directory))
+                    result = BrightDataProvider(cfg, client=Client()).refresh_posts(
+                        [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+                    )
+
+                self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+                self.assertTrue(result.metadata["request_failed"])
+                self.assertEqual(result.metadata["provider_error_count"], 1)
+                self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
 
     def test_http_errors_are_not_retried_and_preserve_provider_error(self) -> None:
         for status, expected_reason in ((400, "provider_error"), (401, "provider_error"), (403, "provider_error"), (404, "unavailable"), (429, "provider_error"), (500, "provider_error")):
