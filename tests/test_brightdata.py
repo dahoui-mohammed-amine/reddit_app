@@ -386,6 +386,22 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(result.posts, [])
         self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
 
+    def test_refresh_normalizes_provider_subreddit_to_requested_value(self) -> None:
+        raw = post_record("smallbusiness")
+        raw["community_name"] = "SmallBusiness"
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [raw], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertEqual(result.posts[0].subreddit, "smallbusiness")
+
     def test_cross_subreddit_identity_is_rejected(self) -> None:
         discovery_record = {
             "post_id": "p",
@@ -630,7 +646,7 @@ class BrightDataTests(unittest.TestCase):
                 self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
 
     def test_http_errors_are_not_retried_and_preserve_provider_error(self) -> None:
-        for status, expected_reason in ((400, "provider_error"), (401, "provider_error"), (403, "provider_error"), (404, "unavailable"), (429, "provider_error"), (500, "provider_error")):
+        for status, expected_reason in ((400, "provider_error"), (401, "provider_error"), (403, "provider_error"), (404, "provider_error"), (429, "provider_error"), (500, "provider_error")):
             calls: list[int] = []
 
             def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float, *, status: int = status, calls: list[int] = calls) -> HttpResponse:
@@ -651,6 +667,30 @@ class BrightDataTests(unittest.TestCase):
             self.assertEqual(metadata["accounting"]["returned_records"], 0)
             self.assertEqual(result.metadata["provider_error_count"], 1, status)
             self.assertEqual(result.metadata["accounting"]["provider_error_count"], 1, status)
+
+    def test_404_target_payload_is_unavailable(self) -> None:
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            return HttpResponse(404, {}, b'{"error":"post not found"}')
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            provider = BrightDataProvider(cfg, client=JsonClient(timeout=1, retries=0, transport=transport, sleep=lambda _: None))
+            result = provider.discover("smallbusiness", None, cfg)
+
+        self.assertTrue(any(gap.reason == "unavailable" for gap in result.gaps))
+
+    def test_refresh_http_error_marks_result_failed(self) -> None:
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            return HttpResponse(500, {}, b'{"error":"provider failure"}')
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            provider = BrightDataProvider(cfg, client=JsonClient(timeout=1, retries=0, transport=transport, sleep=lambda _: None))
+            result = provider.refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertTrue(result.metadata["request_failed"])
 
     def test_non_json_error_text_cannot_imply_unavailable(self) -> None:
         def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:

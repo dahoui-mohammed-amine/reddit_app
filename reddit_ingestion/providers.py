@@ -1167,19 +1167,33 @@ class BrightDataProvider(HttpProviderBase):
     def _unavailable_like(cls, error: Any, status: int | None = None) -> bool:
         if status in {401, 403}:
             return False
-        if status == 404:
-            return True
         if isinstance(error, Mapping):
             if any(str(error.get(key)).strip() in {"401", "403"} for key in ("status", "status_code", "code", "error_code")):
                 return False
             text = " ".join(
                 cls._error_text(error[key])
-                for key in ("error", "message", "reason", "code", "status", "status_code", "error_code")
+                for key in (
+                    "error",
+                    "message",
+                    "reason",
+                    "code",
+                    "status",
+                    "status_code",
+                    "error_code",
+                    "type",
+                    "entity_type",
+                    "resource",
+                )
                 if key in error
             ).casefold()
         else:
             return False
-        return any(term in text for term in ("deleted", "removed", "not found", "unavailable", "private", "restricted", "404"))
+        target_reference = any(term in text for term in ("post", "submission", "comment", "content", "subreddit", "community"))
+        target_not_found = "not found" in text and target_reference
+        target_marker = any(term in text for term in ("deleted", "removed", "private", "restricted", "unavailable"))
+        if status == 404 or any(str(error.get(key)).strip() == "404" for key in ("status", "status_code", "code", "error_code")):
+            return target_not_found or (target_reference and target_marker)
+        return target_not_found or target_marker
 
     @classmethod
     def _provider_gap(cls, entity_type: str, *, entity_id: str | None, subreddit: str | None, error: Any, status: int | None = None) -> Gap:
@@ -1527,6 +1541,7 @@ class BrightDataProvider(HttpProviderBase):
         malformed_item_count = 0
         malformed_response_count = 0
         downstream_provider_error_count = 0
+        batch_request_failed = False
         pending: list[tuple[PostSnapshot, str]] = []
         for post in posts:
             url = self._requested_post_url(post)
@@ -1546,6 +1561,7 @@ class BrightDataProvider(HttpProviderBase):
             records.extend(request_records)
             batch_record = next((record for record in request_records if record.operation == "refresh"), None)
             if error is not None:
+                batch_request_failed = True
                 gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=error.provider_payload if error.provider_payload is not None else str(error), status=error.status) for post, _ in batch)
                 continue
             if response is not None and response.status == 202:
@@ -1652,6 +1668,7 @@ class BrightDataProvider(HttpProviderBase):
                     batch_downstream_provider_error_count += 1
                     gaps.append(_id_mismatch_gap("post", post.post_id, refreshed.post_id, post.subreddit))
                     continue
+                refreshed.subreddit = post.subreddit
                 gaps.extend(_report_only_state_gaps(raw, entity_id=post.post_id, subreddit=post.subreddit))
                 if config.comments_mode in {"bounded", "full"}:
                     gaps.append(self._comments_unsupported_gap(refreshed, config.comments_mode))
@@ -1679,7 +1696,7 @@ class BrightDataProvider(HttpProviderBase):
             "malformed_record_count": malformed_item_count,
             "malformed_response_count": malformed_response_count,
             "provider_error_count": sum(int(record.metadata.get("provider_error_count", 0)) for record in records),
-            "request_failed": malformed_item_count > 0 or malformed_response_count > 0 or downstream_provider_error_count > 0,
+            "request_failed": batch_request_failed or malformed_item_count > 0 or malformed_response_count > 0 or downstream_provider_error_count > 0,
         }
         return RefreshResult(
             all_posts,
