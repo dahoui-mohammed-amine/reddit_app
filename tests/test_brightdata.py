@@ -130,9 +130,8 @@ class BrightDataTests(unittest.TestCase):
 
         post = result.posts[0]
         self.assertEqual((post.body, post.author, post.score, post.created_at), ("A description", "author", 7, OBSERVED))
-        self.assertEqual(post.comments[0].body, "Useful reply")
-        self.assertEqual(post.comments[0].author, "commenter")
-        self.assertEqual(post.comments[0].score, 3)
+        self.assertEqual(post.comments, [])
+        self.assertTrue(any(gap.reason == "unsupported" and gap.entity_type == "comment" for gap in result.gaps))
         self.assertEqual(post.observed_at, result.metadata["fetched_at"])
         self.assertEqual(result.request_records[0].metadata["raw_payload"], [raw])
         self.assertEqual(result.request_records[0].metadata["response_shape"], "array")
@@ -158,34 +157,36 @@ class BrightDataTests(unittest.TestCase):
         self.assertTrue(any(gap.reason == "unavailable" for gap in unavailable_page.gaps))
         self.assertEqual(sparse_page.request_records[0].metadata["accounting"]["provider_error_count"], 1)
 
-    def test_brightdata_200_non_array_is_audited_as_malformed(self) -> None:
+    def test_brightdata_200_object_data_and_records_are_malformed(self) -> None:
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
-                return {"unexpected": True}, HttpResponse(200, {}, b""), "request"
+                return self.payload, HttpResponse(200, {}, b""), "request"
 
-        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
-            root = Path(directory)
-            cfg = config(root)
-            result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+        for payload in ({"data": [post_record("smallbusiness")]}, {"records": [post_record("smallbusiness")]}, {"unexpected": True}):
+            with self.subTest(payload=payload):
+                Client.payload = payload
+                with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+                    root = Path(directory)
+                    cfg = config(root)
+                    result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
 
-        self.assertTrue(any(gap.reason == "provider_error" and "malformed" in (gap.detail or "") for gap in result.gaps))
-        self.assertTrue(result.metadata["request_failed"])
-        self.assertEqual(result.request_records[0].metadata["raw_payload"], {"unexpected": True})
+                self.assertEqual(result.posts, [])
+                self.assertTrue(any(gap.reason == "provider_error" and "malformed" in (gap.detail or "") for gap in result.gaps))
+                self.assertTrue(result.metadata["request_failed"])
+                self.assertEqual(result.request_records[0].metadata["raw_payload"], payload)
 
-    def test_bounded_comments_are_single_request_and_locally_capped(self) -> None:
+    def test_bounded_comments_are_explicitly_unsupported_without_comment_request(self) -> None:
         calls: list[tuple[str, dict[str, object]]] = []
-        comments = [
-            {"comment_id": "c1", "post_id": "p", "comment": "one", "parent_id": "t3_p"},
-            {"comment_id": "c2", "post_id": "p", "comment": "two", "parent_id": "t3_p"},
-        ]
 
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
                 calls.append((url, payload or {}))
-                if "dataset_id=gd_lvzdpsdlw09j6t702" in url:
-                    return comments, HttpResponse(200, {}, b""), "comments-request"
                 record = post_record("smallbusiness")
                 record["num_comments"] = 2
+                record["comments"] = [
+                    {"comment_id": "c1", "post_id": "p", "comment": "one", "parent_id": "t3_p"},
+                    {"comment_id": "c2", "post_id": "p", "comment": "two", "parent_id": "t3_p"},
+                ]
                 return [record], HttpResponse(200, {}, b""), "post-request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
@@ -195,13 +196,10 @@ class BrightDataTests(unittest.TestCase):
                 [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
             )
 
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1][1], {"input": [{"url": "https://www.reddit.com/r/smallbusiness/comments/p/title/"}]})
-        self.assertEqual([record.operation for record in result.request_records], ["refresh", "comments"])
-        self.assertEqual(len(result.posts[0].comments), 1)
-        self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
-        self.assertEqual(result.request_records[1].metadata["accounting"]["returned_records"], 2)
-        self.assertEqual(result.request_records[1].metadata["accounting"]["request_units"], 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([record.operation for record in result.request_records], ["refresh"])
+        self.assertEqual(result.posts[0].comments, [])
+        self.assertTrue(any(gap.reason == "unsupported" and gap.entity_type == "comment" for gap in result.gaps))
         self.assertNotEqual(result.posts[0].observed_at, "")
 
     def test_202_snapshot_is_a_safe_unsupported_result_without_followup(self) -> None:
@@ -256,7 +254,7 @@ class BrightDataTests(unittest.TestCase):
 
         self.assertEqual(cursor_result.gaps[0].reason, "unsupported")
         self.assertIn("Full comment expansion is unsupported", " ".join(plan.notes))
-        self.assertNotIn("collect_comments_full", provider.status().capabilities)
+        self.assertNotIn("collect_comments_bounded", provider.status().capabilities)
 
 
 if __name__ == "__main__":

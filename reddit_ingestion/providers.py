@@ -901,9 +901,8 @@ class BrightDataProvider(HttpProviderBase):
 
     Bright Data's sync API has no documented cursor.  Discovery therefore makes
     one request for a batch of subreddit URLs and never turns a returned URL or
-    snapshot into an invented follow-up page.  Comments are a separate,
-    bounded-at-the-application-boundary operation; this adapter makes at most
-    one comments request per refreshed post and never paginates it.
+    snapshot into an invented follow-up page.  Comment expansion is unsupported
+    because the documented comment records provide neither depth nor a count cap.
     """
 
     name = "brightdata"
@@ -945,7 +944,7 @@ class BrightDataProvider(HttpProviderBase):
             True,
             supports_refresh_batch=True,
             refresh_batch_size=self.max_sync_inputs,
-            capabilities=("discover_subreddit", "collect_post", "collect_comments_bounded"),
+            capabilities=("discover_subreddit", "collect_post"),
         )
 
     def plan(self, config: Config, known_posts: int, *, resume_pages: int = 0, mode: str = "run") -> Plan:
@@ -956,7 +955,7 @@ class BrightDataProvider(HttpProviderBase):
         refreshable = _run_refresh_capacity(config, subreddit_inputs, known_posts, mode)
         refresh_events = min(refreshable, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
         post_requests = (refresh_events + self.max_sync_inputs - 1) // self.max_sync_inputs
-        comment_requests = refresh_events if config.comments_mode == "bounded" and mode in {"run", "refresh"} else 0
+        comment_requests = 0
         notes = [
             "Bright Data sync accepts at most 20 input URLs; each request is one request unit, not a record estimate.",
             "Bright Data record billing/credits are not inferred; inspect returned record and error counts.",
@@ -968,8 +967,8 @@ class BrightDataProvider(HttpProviderBase):
             notes.append("Existing cursors are not Bright Data pagination; the adapter performs a fresh discovery and does not resume them.")
         if config.comments_mode == "full":
             notes.append("Full comment expansion is unsupported: the comments dataset has no documented count or pagination bound.")
-        elif comment_requests:
-            notes.append("Bounded comments make at most one comments-dataset request per refreshed post and cap normalized records locally; provider output/billing may be larger.")
+        else:
+            notes.append("Bounded comments are unsupported: documented comment records expose no depth and days_back is not a count cap; no comments request is made.")
         estimated_requests: int | None = discovery + post_requests + comment_requests
         if mode == "refresh":
             estimated_requests = post_requests + comment_requests
@@ -1032,10 +1031,8 @@ class BrightDataProvider(HttpProviderBase):
         if isinstance(payload, dict):
             if payload.get("snapshot_id"):
                 return "snapshot"
-            if "data" in payload:
-                return "object.data"
-            if "records" in payload:
-                return "object.records"
+            if "data" in payload or "records" in payload:
+                return "object"
             if "errors" in payload:
                 return "object.errors"
             return "object"
@@ -1051,9 +1048,8 @@ class BrightDataProvider(HttpProviderBase):
         errors = raw_errors if isinstance(raw_errors, list) else [raw_errors] if raw_errors not in (None, "") else []
         if payload.get("snapshot_id"):
             return None, errors, "snapshot"
-        for key in ("data", "records"):
-            if key in payload:
-                return (payload[key] if isinstance(payload[key], list) else None), errors, cls._response_shape(payload)
+        if "data" in payload or "records" in payload:
+            return None, errors, "object"
         if "errors" in payload:
             return [], errors, "object.errors"
         return None, errors, "object"
@@ -1278,8 +1274,10 @@ class BrightDataProvider(HttpProviderBase):
                 [dict(raw, subreddit=subreddit) for raw in raw_items],
                 default_subreddit=subreddit,
                 observed_at=fetched_at,
-                include_comments=True,
+                include_comments=False,
             )
+            if config.comments_mode in {"bounded", "full"}:
+                parse_gaps.extend(self._comments_unsupported_gap(post, config.comments_mode) for post in posts)
             gaps = list(shared_gaps) + parse_gaps
             if shared_error is not None:
                 gaps.append(self._provider_gap("listing", entity_id=None, subreddit=subreddit, error=shared_error, status=error.status if error else None))
@@ -1361,33 +1359,14 @@ class BrightDataProvider(HttpProviderBase):
         except (TypeError, ValueError):
             return False
 
-    def _bounded_comments(self, post: PostSnapshot, config: Config) -> tuple[list[Any], list[Gap], list[RequestRecord]]:
-        post_url = self._requested_post_url(post)
-        if not post_url:
-            return [], [Gap("comment", "missing_permalink", entity_id=post.post_id, subreddit=post.subreddit)], []
-        request_payload = {"input": [{"url": post_url}]}
-        payload, _response, _request_id, request_records, fetched_at, error = self._request(
-            dataset_id=self.comments_dataset_id,
-            query={},
-            request_payload=request_payload,
-            operation="comments",
+    @staticmethod
+    def _comments_unsupported_gap(post: PostSnapshot, mode: str) -> Gap:
+        detail = (
+            "Bright Data full comment expansion is unsupported: the comments dataset has no documented count or pagination bound."
+            if mode == "full"
+            else "Bright Data bounded comments are unsupported: documented comment records expose no depth and days_back is not a count cap."
         )
-        if error is not None:
-            return [], [self._provider_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, error=error.provider_payload if error.provider_payload is not None else str(error), status=error.status)], request_records
-        raw_items, errors, shape = self._records_and_errors(payload)
-        self._update_accounting(request_records, returned_records=len(raw_items or []), provider_error_count=len(errors))
-        if shape == "snapshot":
-            snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
-            return [], [Gap("comment", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail=f"Bright Data returned async snapshot {snapshot_id!r}; snapshot polling is not enabled")], request_records
-        if raw_items is None:
-            return [], [Gap("comment", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=f"malformed provider payload: expected a JSON array, got {shape}")], request_records
-        gaps = [self._provider_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, error=item) for item in errors]
-        if len(raw_items) > config.comment_limit:
-            gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail=f"Bright Data returned {len(raw_items)} comment records; normalized at most comment_limit={config.comment_limit} without pagination"))
-        selected = raw_items[: config.comment_limit]
-        comments, parse_gaps = _parse_comment_items(selected, post=post, observed_at=fetched_at)
-        gaps.extend(parse_gaps)
-        return comments, gaps, request_records
+        return Gap("comment", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail=detail)
 
     def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
         all_posts: list[PostSnapshot] = []
@@ -1446,14 +1425,12 @@ class BrightDataProvider(HttpProviderBase):
                     else:
                         gaps.append(Gap("post", "not_returned", entity_id=post.post_id, subreddit=post.subreddit, detail="Bright Data returned no record for this requested URL"))
                     continue
-                comment_errors: list[Exception] = []
                 try:
                     refreshed = parse_post(
                         raw,
                         default_subreddit=post.subreddit,
                         observed_at=fetched_at,
-                        include_comments=True,
-                        comment_errors=comment_errors,
+                        include_comments=False,
                     )
                 except (TypeError, ValueError) as exc:
                     gaps.append(_malformed_gap("post", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
@@ -1461,17 +1438,8 @@ class BrightDataProvider(HttpProviderBase):
                 if refreshed.post_id != post.post_id:
                     gaps.append(_id_mismatch_gap("post", post.post_id, refreshed.post_id, post.subreddit))
                     continue
-                gaps.extend(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for exc in comment_errors)
-                if config.comments_mode == "full":
-                    gaps.append(Gap("comment", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail="Bright Data does not document a bounded or paginated full-comment equivalent"))
-                elif "comments" not in raw and (refreshed.num_comments != 0):
-                    comments, comment_gaps, comment_records = self._bounded_comments(refreshed, config)
-                    refreshed.comments = comments
-                    gaps.extend(comment_gaps)
-                    records.extend(comment_records)
-                if len(refreshed.comments) > config.comment_limit and config.comments_mode == "bounded":
-                    refreshed.comments = refreshed.comments[: config.comment_limit]
-                    gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail=f"normalized at most comment_limit={config.comment_limit}; no pagination requested"))
+                if config.comments_mode in {"bounded", "full"}:
+                    gaps.append(self._comments_unsupported_gap(refreshed, config.comments_mode))
                 count_gap = comment_count_gap(refreshed, expected_num_comments=post.num_comments)
                 if count_gap and not any(gap.entity_id == post.post_id and gap.reason == "unexpanded" for gap in gaps):
                     gaps.append(count_gap)
