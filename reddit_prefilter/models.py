@@ -75,7 +75,18 @@ def _freeze(value: Any) -> Any:
 
 def _thaw(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {deepcopy(key): _thaw(item) for key, item in value.items()}
+        if all(isinstance(key, str) for key in value):
+            return {deepcopy(key): _thaw(item) for key, item in value.items()}
+        entries = [
+            {
+                "key_type": f"{type(key).__module__}.{type(key).__qualname__}",
+                "key": _thaw(key),
+                "value": _thaw(item),
+            }
+            for key, item in value.items()
+        ]
+        entries.sort(key=lambda entry: (entry["key_type"], _canonical_dump(entry["key"])))
+        return ["mapping", entries]
     if isinstance(value, tuple):
         return [_thaw(item) for item in value]
     if isinstance(value, frozenset):

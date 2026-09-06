@@ -574,6 +574,7 @@ class PrefilterTests(unittest.TestCase):
         self.assertNotEqual(result.decisions[0].evidence_id, result.decisions[1].evidence_id)
         self.assertEqual(result.decisions[2].status, "accepted")
         self.assertEqual(len(result.decisions[2].evidence_id), 64)
+        json.dumps(result.to_dict(), sort_keys=True)
 
     def test_mapping_tag_cannot_collide_with_literal_mapping_data(self) -> None:
         mixed = RawRecord("post", {1: "v"}, self.lineage)
