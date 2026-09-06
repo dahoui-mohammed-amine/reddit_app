@@ -9,12 +9,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .comments import comment_count_gap
 from .config import Config
-from .models import Gap, PageResult, Plan, PostSnapshot, ProviderStatus, RefreshResult, RequestRecord
+from .models import (
+    Gap,
+    PageResult,
+    Plan,
+    PostSnapshot,
+    ProviderStatus,
+    RefreshResult,
+    RequestRecord,
+)
 from .normalize import parse_comment, parse_post, post_id, utc_now
 
 
@@ -33,13 +41,24 @@ class RequestAttempt:
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, message: str, *, status: int | None = None, retryable: bool = False, billed: bool | None = None, request_id: str | None = None, url: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        retryable: bool = False,
+        billed: bool | None = None,
+        request_id: str | None = None,
+        url: str | None = None,
+        provider_payload: Any = None,
+    ):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
         self.billed = billed
         self.request_id = request_id
         self.url = url
+        self.provider_payload = provider_payload
         self.attempts: list[RequestAttempt] = []
 
 
@@ -69,16 +88,18 @@ class JsonClient:
         transport: JsonTransport = urllib_transport,
         sleep: Callable[[float], None] = time.sleep,
         min_interval_seconds: float = 0.0,
+        allow_non_object: bool = False,
     ):
         self.timeout = timeout
         self.retries = retries
         self.transport = transport
         self.sleep = sleep
         self.min_interval_seconds = max(0.0, min_interval_seconds)
+        self.allow_non_object = allow_non_object
         self._last_request_at: float | None = None
         self.last_attempts: list[RequestAttempt] = []
 
-    def request(self, method: str, url: str, *, headers: Mapping[str, str], payload: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], HttpResponse, str]:
+    def request(self, method: str, url: str, *, headers: Mapping[str, str], payload: Mapping[str, Any] | None = None) -> tuple[Any, HttpResponse, str]:
         body = json.dumps(payload).encode() if payload is not None else None
         request_id = str(uuid.uuid4())
         self.last_attempts = []
@@ -115,7 +136,14 @@ class JsonClient:
                 parsed = json.loads(response.body.decode("utf-8")) if response.body else {}
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 self.last_attempts[-1].billed = None
-                error = ProviderError(f"provider returned non-JSON response with status {response.status}", status=response.status, retryable=response.status >= 500, request_id=request_id, url=url)
+                error = ProviderError(
+                    f"provider returned non-JSON response with status {response.status}",
+                    status=response.status,
+                    retryable=response.status >= 500,
+                    request_id=request_id,
+                    url=url,
+                    provider_payload=response.body.decode("utf-8", errors="replace"),
+                )
                 error.attempts = list(self.last_attempts)
                 raise error from exc
             if response.status >= 400:
@@ -126,12 +154,19 @@ class JsonClient:
                     billed=None,
                     request_id=request_id,
                     url=url,
+                    provider_payload=parsed,
                 )
                 error.attempts = list(self.last_attempts)
                 raise error
-            if not isinstance(parsed, dict):
+            if not isinstance(parsed, dict) and not self.allow_non_object:
                 self.last_attempts[-1].billed = None
-                error = ProviderError("provider response must be a JSON object", status=response.status, request_id=request_id, url=url)
+                error = ProviderError(
+                    "provider response must be a JSON object",
+                    status=response.status,
+                    request_id=request_id,
+                    url=url,
+                    provider_payload=parsed,
+                )
                 error.attempts = list(self.last_attempts)
                 raise error
             return parsed, response, request_id
@@ -251,6 +286,9 @@ def _request_records(
 
 def _failed_request_records(client: Any, operation: str, url: str, error: ProviderError, metadata: dict[str, Any] | None = None) -> list[RequestRecord]:
     details = {"url": url, "error": str(error)}
+    if error.provider_payload is not None:
+        details["raw_payload"] = error.provider_payload
+        details["provider_error"] = error.provider_payload
     if metadata:
         details.update(metadata)
     attempts = error.attempts or _client_attempts(client)
@@ -858,6 +896,612 @@ class FetchLayerProvider(HttpProviderBase):
         return RefreshResult([refreshed_post], utc_now(), request_id, response.status, cache_status, cache_observed_at, gaps=result_gaps, request_records=records, observation_requests={post.post_id: record})
 
 
+class BrightDataProvider(HttpProviderBase):
+    """Opt-in adapter for Bright Data's documented Reddit Scraper API.
+
+    Bright Data's sync API has no documented cursor.  Discovery therefore makes
+    one request for a batch of subreddit URLs and never turns a returned URL or
+    snapshot into an invented follow-up page.  Comments are a separate,
+    bounded-at-the-application-boundary operation; this adapter makes at most
+    one comments request per refreshed post and never paginates it.
+    """
+
+    name = "brightdata"
+    key_env = "BRIGHTDATA_API_KEY"
+    base_url = "https://api.brightdata.com"
+    posts_dataset_id = "gd_lvz8ah06191smkebj4"
+    comments_dataset_id = "gd_lvzdpsdlw09j6t702"
+    max_sync_inputs = 20
+
+    def __init__(self, config: Config, client: JsonClient | None = None):
+        self.config = config
+        # A timeout, ambiguous response, 429, or 500 must not be replayed:
+        # collection may be billable even when no record is delivered.
+        self.client = client or JsonClient(
+            timeout=config.request_timeout_seconds,
+            retries=0,
+            min_interval_seconds=config.request_interval_seconds,
+            allow_non_object=True,
+        )
+        if isinstance(self.client, JsonClient):
+            self.client.retries = 0
+            self.client.allow_non_object = True
+        self.key = _env_key(self.key_env)
+        self._discovery_pages: dict[str, PageResult] = {}
+        self._discovery_served: set[str] = set()
+
+    def status(self) -> ProviderStatus:
+        if not self.key:
+            message = f"missing {self.key_env}; no network call will be made"
+            available = False
+        else:
+            message = f"credential found in {self.key_env}; live access is provider-billed"
+            available = True
+        return ProviderStatus(
+            self.name,
+            available,
+            True,
+            message,
+            True,
+            supports_refresh_batch=True,
+            refresh_batch_size=self.max_sync_inputs,
+            capabilities=("discover_subreddit", "collect_post", "collect_comments_bounded"),
+        )
+
+    def plan(self, config: Config, known_posts: int, *, resume_pages: int = 0, mode: str = "run") -> Plan:
+        if mode not in {"run", "discover", "refresh"}:
+            raise ValueError("mode must be run, discover, or refresh")
+        subreddit_inputs = len(config.subreddits) if mode in {"run", "discover"} else 0
+        discovery = (subreddit_inputs + self.max_sync_inputs - 1) // self.max_sync_inputs
+        refreshable = _run_refresh_capacity(config, subreddit_inputs, known_posts, mode)
+        refresh_events = min(refreshable, config.max_refresh_posts) if mode in {"run", "refresh"} else 0
+        post_requests = (refresh_events + self.max_sync_inputs - 1) // self.max_sync_inputs
+        comment_requests = refresh_events if config.comments_mode == "bounded" and mode in {"run", "refresh"} else 0
+        notes = [
+            "Bright Data sync accepts at most 20 input URLs; each request is one request unit, not a record estimate.",
+            "Bright Data record billing/credits are not inferred; inspect returned record and error counts.",
+            "No documented Reddit cursor or pagination is used; max_discovery_pages beyond the first is unsupported.",
+            "Bright Data requests are sent with the documented {input: [...]} JSON body and include_errors=true.",
+            "No automatic retries are used, including for 429, 500, timeout, or ambiguous responses.",
+        ]
+        if resume_pages:
+            notes.append("Existing cursors are not Bright Data pagination; the adapter performs a fresh discovery and does not resume them.")
+        if config.comments_mode == "full":
+            notes.append("Full comment expansion is unsupported: the comments dataset has no documented count or pagination bound.")
+        elif comment_requests:
+            notes.append("Bounded comments make at most one comments-dataset request per refreshed post and cap normalized records locally; provider output/billing may be larger.")
+        estimated_requests: int | None = discovery + post_requests + comment_requests
+        if mode == "refresh":
+            estimated_requests = post_requests + comment_requests
+        if mode == "discover":
+            estimated_requests = discovery
+        return Plan(
+            self.name,
+            discovery,
+            refresh_events,
+            estimated_requests,
+            None,
+            "provider requests; records unpriced",
+            notes,
+        )
+
+    @staticmethod
+    def _subreddit_key(subreddit: str) -> str:
+        return subreddit.removeprefix("r/").casefold()
+
+    @staticmethod
+    def _canonical_url(value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        value = value.strip()
+        if value.startswith("/"):
+            value = f"https://www.reddit.com{value}"
+        return value.rstrip("/").casefold()
+
+    @classmethod
+    def _absolute_reddit_url(cls, value: str) -> str:
+        return value if value.startswith(("http://", "https://")) else f"https://www.reddit.com{value if value.startswith('/') else '/' + value}"
+
+    @classmethod
+    def _subreddit_from_value(cls, value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        value = value.strip()
+        if "://" in value or value.startswith("/"):
+            path = urlparse(value).path.strip("/").split("/")
+            try:
+                index = next(index for index, item in enumerate(path) if item.casefold() == "r")
+            except StopIteration:
+                return None
+            return path[index + 1] if index + 1 < len(path) and path[index + 1] else None
+        value = value.strip("/")
+        return value[2:] if value.casefold().startswith("r/") else value
+
+    @classmethod
+    def _record_subreddit(cls, raw: Mapping[str, Any]) -> str | None:
+        for key in ("community_url", "subreddit_url", "community_name", "subreddit", "community"):
+            subreddit = cls._subreddit_from_value(raw.get(key))
+            if subreddit:
+                return subreddit
+        return None
+
+    @staticmethod
+    def _response_shape(payload: Any) -> str:
+        if isinstance(payload, list):
+            return "array"
+        if isinstance(payload, dict):
+            if payload.get("snapshot_id"):
+                return "snapshot"
+            if "data" in payload:
+                return "object.data"
+            if "records" in payload:
+                return "object.records"
+            if "errors" in payload:
+                return "object.errors"
+            return "object"
+        return type(payload).__name__
+
+    @classmethod
+    def _records_and_errors(cls, payload: Any) -> tuple[list[Any] | None, list[Any], str]:
+        if isinstance(payload, list):
+            return payload, [], "array"
+        if not isinstance(payload, dict):
+            return None, [], cls._response_shape(payload)
+        raw_errors = payload.get("errors", [])
+        errors = raw_errors if isinstance(raw_errors, list) else [raw_errors] if raw_errors not in (None, "") else []
+        if payload.get("snapshot_id"):
+            return None, errors, "snapshot"
+        for key in ("data", "records"):
+            if key in payload:
+                return (payload[key] if isinstance(payload[key], list) else None), errors, cls._response_shape(payload)
+        if "errors" in payload:
+            return [], errors, "object.errors"
+        return None, errors, "object"
+
+    @staticmethod
+    def _error_text(error: Any) -> str:
+        try:
+            return json.dumps(error, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(error)
+
+    @classmethod
+    def _error_matches(cls, error: Any, target_url: str | None) -> bool:
+        if not isinstance(error, Mapping):
+            return True
+        candidates: list[Any] = []
+        for key in ("url", "input", "requested_url", "original_url"):
+            value = error.get(key)
+            if isinstance(value, Mapping):
+                candidates.extend(value.get(key_name) for key_name in ("url", "input") if value.get(key_name))
+            elif value:
+                candidates.append(value)
+        if not candidates:
+            return True
+        target = cls._canonical_url(target_url)
+        return target is not None and any(cls._canonical_url(candidate) == target for candidate in candidates)
+
+    @classmethod
+    def _unavailable_like(cls, error: Any, status: int | None = None) -> bool:
+        if status == 404:
+            return True
+        text = cls._error_text(error).casefold()
+        return any(term in text for term in ("deleted", "removed", "not found", "unavailable", "private", "restricted", "404"))
+
+    @classmethod
+    def _provider_gap(cls, entity_type: str, *, entity_id: str | None, subreddit: str | None, error: Any, status: int | None = None) -> Gap:
+        reason = "unavailable" if cls._unavailable_like(error, status) else "provider_error"
+        return Gap(entity_type, reason, entity_id=entity_id, subreddit=subreddit, detail=f"Bright Data provider error: {cls._error_text(error)}")
+
+    @classmethod
+    def _request_metadata(
+        cls,
+        *,
+        request_url: str,
+        dataset_id: str,
+        request_payload: Mapping[str, Any],
+        fetched_at: str,
+        raw_payload: Any,
+        returned_records: int,
+        provider_error_count: int,
+    ) -> dict[str, Any]:
+        return {
+            "url": request_url,
+            "dataset_id": dataset_id,
+            "request_payload": request_payload,
+            "fetched_at": fetched_at,
+            "raw_payload": raw_payload,
+            "response_shape": cls._response_shape(raw_payload),
+            "requested_inputs": len(request_payload.get("input", [])),
+            "returned_records": returned_records,
+            "provider_error_count": provider_error_count,
+            "accounting": {
+                "requested_inputs": len(request_payload.get("input", [])),
+                "returned_records": returned_records,
+                "provider_error_count": provider_error_count,
+                "request_units": 1,
+                "billing_semantics": "undocumented",
+            },
+        }
+
+    @staticmethod
+    def _error_list_for_target(errors: list[Any], target_url: str | None) -> list[Any]:
+        specific = [error for error in errors if isinstance(error, Mapping) and not BrightDataProvider._error_matches(error, None)]
+        if specific:
+            matched = [error for error in specific if BrightDataProvider._error_matches(error, target_url)]
+            return matched
+        return [error for error in errors if BrightDataProvider._error_matches(error, target_url)]
+
+    def _request(
+        self,
+        *,
+        dataset_id: str,
+        query: Mapping[str, str],
+        request_payload: Mapping[str, Any],
+        operation: str,
+    ) -> tuple[Any | None, HttpResponse | None, str | None, list[RequestRecord], str, ProviderError | None]:
+        key = self._require_key()
+        params = {"dataset_id": dataset_id, "include_errors": "true", **query}
+        request_url = f"{self.base_url}/datasets/v3/scrape?{urlencode(params)}"
+        fetched_at = utc_now()
+        try:
+            payload, response, request_id = self.client.request(
+                "POST",
+                request_url,
+                headers={"Authorization": f"Bearer {key}"},
+                payload=request_payload,
+            )
+        except ProviderError as exc:
+            records = _failed_request_records(
+                self.client,
+                operation,
+                request_url,
+                exc,
+                {
+                    "dataset_id": dataset_id,
+                    "request_payload": request_payload,
+                    "fetched_at": fetched_at,
+                    "requested_inputs": len(request_payload.get("input", [])),
+                    "returned_records": 0,
+                    "provider_error_count": 1,
+                    "accounting": {
+                        "requested_inputs": len(request_payload.get("input", [])),
+                        "returned_records": 0,
+                        "provider_error_count": 1,
+                        "request_units": 1,
+                        "billing_semantics": "undocumented",
+                    },
+                },
+            )
+            return None, None, exc.request_id, records, fetched_at, exc
+        records = _request_records(
+            self.client,
+            operation,
+            request_id,
+            response,
+            "unknown",
+            None,
+            self._request_metadata(
+                request_url=request_url,
+                dataset_id=dataset_id,
+                request_payload=request_payload,
+                fetched_at=fetched_at,
+                raw_payload=payload,
+                returned_records=len(payload) if isinstance(payload, list) else 0,
+                provider_error_count=0,
+            ),
+            billed=None,
+        )
+        return payload, response, request_id, records, fetched_at, None
+
+    @staticmethod
+    def _update_accounting(records: list[RequestRecord], *, returned_records: int, provider_error_count: int) -> None:
+        for record in records:
+            record.metadata["returned_records"] = returned_records
+            record.metadata["provider_error_count"] = provider_error_count
+            accounting = record.metadata.setdefault("accounting", {})
+            accounting["returned_records"] = returned_records
+            accounting["provider_error_count"] = provider_error_count
+
+    def _cursor_unsupported(self, subreddit: str, cursor: str) -> PageResult:
+        observed = utc_now()
+        return PageResult(
+            [],
+            cursor,
+            cursor,
+            observed,
+            None,
+            None,
+            None,
+            gaps=[Gap("listing", "unsupported", subreddit=subreddit, detail="Bright Data documents sort/date/limit controls, not a Reddit pagination cursor")],
+            metadata={"request_failed": True, "checkpoint_deferred": True, "capability": "pagination_unsupported", "fetched_at": observed},
+        )
+
+    def _batch_for(self, subreddit: str, config: Config) -> list[str]:
+        requested = self._subreddit_key(subreddit)
+        configured = list(config.subreddits)
+        for offset in range(0, len(configured), self.max_sync_inputs):
+            batch = configured[offset : offset + self.max_sync_inputs]
+            if any(self._subreddit_key(item) == requested for item in batch):
+                return batch
+        return [subreddit]
+
+    def _fetch_discovery_batch(self, batch: list[str], config: Config) -> None:
+        inputs = [{"url": f"https://www.reddit.com/r/{subreddit}/", "sort_by": "new"} for subreddit in batch]
+        request_payload = {"input": inputs}
+        query = {"type": "discover_new", "discover_by": "subreddit_url"}
+        payload, response, request_id, request_records, fetched_at, error = self._request(
+            dataset_id=self.posts_dataset_id,
+            query=query,
+            request_payload=request_payload,
+            operation="discover",
+        )
+        by_subreddit: dict[str, list[Mapping[str, Any]]] = {self._subreddit_key(subreddit): [] for subreddit in batch}
+        errors: list[Any] = []
+        shared_gaps: list[Gap] = []
+        shared_error: Any = None
+        snapshot_id: str | None = None
+        malformed_shape: str | None = None
+        unattributed_record = False
+        returned_count = 0
+        response_status = response.status if response else error.status if error else None
+        if error is not None:
+            shared_error = error.provider_payload if error.provider_payload is not None else str(error)
+        else:
+            raw_records, errors, shape = self._records_and_errors(payload)
+            returned_count = len(raw_records or [])
+            self._update_accounting(request_records, returned_records=returned_count, provider_error_count=len(errors))
+            if shape == "snapshot":
+                snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
+            elif raw_records is None:
+                malformed_shape = shape
+            else:
+                for raw in raw_records:
+                    if not isinstance(raw, Mapping):
+                        unattributed_record = True
+                        continue
+                    if "error" in raw and not any(key in raw for key in ("id", "post_id", "fullname", "name")):
+                        errors.append(raw)
+                        continue
+                    subreddit = self._record_subreddit(raw)
+                    key = self._subreddit_key(subreddit) if subreddit else None
+                    if key not in by_subreddit:
+                        unattributed_record = True
+                        continue
+                    by_subreddit[key].append(raw)
+                self._update_accounting(request_records, returned_records=returned_count, provider_error_count=len(errors))
+        for key, raw_items in by_subreddit.items():
+            subreddit = next(item for item in batch if self._subreddit_key(item) == key)
+            target_url = f"https://www.reddit.com/r/{subreddit}/"
+            target_errors = self._error_list_for_target(errors, target_url) if error is None else []
+            posts, parse_gaps = _parse_post_items(
+                [dict(raw, subreddit=subreddit) for raw in raw_items],
+                default_subreddit=subreddit,
+                observed_at=fetched_at,
+                include_comments=True,
+            )
+            gaps = list(shared_gaps) + parse_gaps
+            if shared_error is not None:
+                gaps.append(self._provider_gap("listing", entity_id=None, subreddit=subreddit, error=shared_error, status=error.status if error else None))
+            elif snapshot_id is not None:
+                gaps.append(Gap("listing", "unsupported", subreddit=subreddit, detail=f"Bright Data returned async snapshot {snapshot_id!r}; snapshot polling is not part of this ingestion seam"))
+            elif malformed_shape is not None:
+                gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail=f"malformed provider payload: expected a JSON array, got {malformed_shape}"))
+            if unattributed_record:
+                gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail="provider returned a discovery record that could not be attributed to a requested subreddit"))
+            gaps.extend(self._provider_gap("listing", entity_id=None, subreddit=subreddit, error=item) for item in target_errors)
+            request_failed = error is not None or bool(raw_items and any(gap.entity_type == "post" for gap in parse_gaps)) or bool(target_errors) or any(gap.entity_type == "listing" and gap.reason in {"provider_error", "unavailable", "unsupported"} for gap in gaps)
+            metadata = {
+                "dataset_id": self.posts_dataset_id,
+                "fetched_at": fetched_at,
+                "requested_inputs": len(batch),
+                "returned_records": returned_count,
+                "provider_error_count": len(errors),
+                "accounting": {
+                    "requested_inputs": len(batch),
+                    "returned_records": returned_count,
+                    "provider_error_count": len(errors),
+                    "request_units": 1,
+                    "billing_semantics": "undocumented",
+                },
+                "comments_expanded": not any(gap.entity_type == "comment" for gap in gaps),
+                "request_failed": bool(request_failed),
+                "checkpoint_deferred": bool(request_failed),
+            }
+            if payload is not None:
+                metadata["raw_payload"] = payload
+                metadata["response_shape"] = self._response_shape(payload)
+            elif error is not None and error.provider_payload is not None:
+                metadata["raw_payload"] = error.provider_payload
+                metadata["provider_error"] = error.provider_payload
+                metadata["response_shape"] = self._response_shape(error.provider_payload)
+            if snapshot_id is not None:
+                metadata["async_snapshot_id"] = snapshot_id
+            first = self._subreddit_key(batch[0]) == key
+            self._discovery_pages[key] = PageResult(
+                posts,
+                None,
+                None,
+                fetched_at,
+                f"{self.base_url}/datasets/v3/scrape",
+                response_status,
+                request_id if first else None,
+                "unknown",
+                None,
+                gaps,
+                metadata,
+                request_records if first else [],
+            )
+
+    def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+        if cursor is not None:
+            return self._cursor_unsupported(subreddit, cursor)
+        key = self._subreddit_key(subreddit)
+        if key not in self._discovery_pages or key in self._discovery_served:
+            batch = self._batch_for(subreddit, config)
+            for item in batch:
+                self._discovery_pages.pop(self._subreddit_key(item), None)
+                self._discovery_served.discard(self._subreddit_key(item))
+            self._fetch_discovery_batch(batch, config)
+        self._discovery_served.add(key)
+        return self._discovery_pages[key]
+
+    @staticmethod
+    def _requested_post_url(post: PostSnapshot) -> str | None:
+        value = post.permalink or post.url
+        return BrightDataProvider._absolute_reddit_url(value) if value else None
+
+    def _post_record_matches(self, raw: Mapping[str, Any], post: PostSnapshot) -> bool:
+        requested_url = self._canonical_url(self._requested_post_url(post))
+        for key in ("url", "post_url", "permalink"):
+            if self._canonical_url(raw.get(key)) == requested_url and requested_url is not None:
+                return True
+        try:
+            return post_id(raw) == post.post_id
+        except (TypeError, ValueError):
+            return False
+
+    def _bounded_comments(self, post: PostSnapshot, config: Config) -> tuple[list[Any], list[Gap], list[RequestRecord]]:
+        post_url = self._requested_post_url(post)
+        if not post_url:
+            return [], [Gap("comment", "missing_permalink", entity_id=post.post_id, subreddit=post.subreddit)], []
+        request_payload = {"input": [{"url": post_url}]}
+        payload, _response, _request_id, request_records, fetched_at, error = self._request(
+            dataset_id=self.comments_dataset_id,
+            query={},
+            request_payload=request_payload,
+            operation="comments",
+        )
+        if error is not None:
+            return [], [self._provider_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, error=error.provider_payload if error.provider_payload is not None else str(error), status=error.status)], request_records
+        raw_items, errors, shape = self._records_and_errors(payload)
+        self._update_accounting(request_records, returned_records=len(raw_items or []), provider_error_count=len(errors))
+        if shape == "snapshot":
+            snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
+            return [], [Gap("comment", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail=f"Bright Data returned async snapshot {snapshot_id!r}; snapshot polling is not enabled")], request_records
+        if raw_items is None:
+            return [], [Gap("comment", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=f"malformed provider payload: expected a JSON array, got {shape}")], request_records
+        gaps = [self._provider_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, error=item) for item in errors]
+        if len(raw_items) > config.comment_limit:
+            gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail=f"Bright Data returned {len(raw_items)} comment records; normalized at most comment_limit={config.comment_limit} without pagination"))
+        selected = raw_items[: config.comment_limit]
+        comments, parse_gaps = _parse_comment_items(selected, post=post, observed_at=fetched_at)
+        gaps.extend(parse_gaps)
+        return comments, gaps, request_records
+
+    def refresh_posts(self, posts: list[PostSnapshot], config: Config) -> RefreshResult:
+        all_posts: list[PostSnapshot] = []
+        gaps: list[Gap] = []
+        records: list[RequestRecord] = []
+        observation_requests: dict[str, RequestRecord] = {}
+        pending: list[tuple[PostSnapshot, str]] = []
+        for post in posts:
+            url = self._requested_post_url(post)
+            if url is None:
+                gaps.append(Gap("post", "missing_permalink", entity_id=post.post_id, subreddit=post.subreddit))
+            else:
+                pending.append((post, url))
+        for offset in range(0, len(pending), self.max_sync_inputs):
+            batch = pending[offset : offset + self.max_sync_inputs]
+            request_payload = {"input": [{"url": url} for _, url in batch]}
+            payload, response, request_id, request_records, fetched_at, error = self._request(
+                dataset_id=self.posts_dataset_id,
+                query={},
+                request_payload=request_payload,
+                operation="refresh",
+            )
+            records.extend(request_records)
+            batch_record = next((record for record in request_records if record.operation == "refresh"), None)
+            if error is not None:
+                gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=error.provider_payload if error.provider_payload is not None else str(error), status=error.status) for post, _ in batch)
+                continue
+            raw_items, errors, shape = self._records_and_errors(payload)
+            if shape == "snapshot":
+                snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
+                gaps.extend(Gap("post", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail=f"Bright Data returned async snapshot {snapshot_id!r}; snapshot polling is not enabled") for post, _ in batch)
+                continue
+            if raw_items is None:
+                gaps.extend(Gap("post", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=f"malformed provider payload: expected a JSON array, got {shape}") for post, _ in batch)
+                continue
+            output_records = [item for item in raw_items if isinstance(item, Mapping) and not ("error" in item and not any(key in item for key in ("id", "post_id", "fullname", "name")))]
+            provider_errors = errors + [item for item in raw_items if isinstance(item, Mapping) and "error" in item and not any(key in item for key in ("id", "post_id", "fullname", "name"))]
+            self._update_accounting(request_records, returned_records=len(output_records), provider_error_count=len(provider_errors))
+            returned_by_post: dict[str, Mapping[str, Any]] = {}
+            for raw in output_records:
+                matches = [post for post, _ in batch if self._post_record_matches(raw, post)]
+                if len(matches) != 1:
+                    gaps.append(Gap("post", "provider_error", detail="provider record could not be attributed to exactly one requested post"))
+                    continue
+                target = matches[0]
+                if target.post_id in returned_by_post:
+                    gaps.append(Gap("post", "provider_error", entity_id=target.post_id, subreddit=target.subreddit, detail="provider returned duplicate post records"))
+                    continue
+                returned_by_post[target.post_id] = raw
+            for post, requested_url in batch:
+                raw = returned_by_post.get(post.post_id)
+                target_errors = [item for item in provider_errors if self._error_matches(item, requested_url)]
+                if raw is None:
+                    if target_errors:
+                        gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=item) for item in target_errors)
+                    else:
+                        gaps.append(Gap("post", "not_returned", entity_id=post.post_id, subreddit=post.subreddit, detail="Bright Data returned no record for this requested URL"))
+                    continue
+                comment_errors: list[Exception] = []
+                try:
+                    refreshed = parse_post(
+                        raw,
+                        default_subreddit=post.subreddit,
+                        observed_at=fetched_at,
+                        include_comments=True,
+                        comment_errors=comment_errors,
+                    )
+                except (TypeError, ValueError) as exc:
+                    gaps.append(_malformed_gap("post", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
+                    continue
+                if refreshed.post_id != post.post_id:
+                    gaps.append(_id_mismatch_gap("post", post.post_id, refreshed.post_id, post.subreddit))
+                    continue
+                gaps.extend(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)) for exc in comment_errors)
+                if config.comments_mode == "full":
+                    gaps.append(Gap("comment", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail="Bright Data does not document a bounded or paginated full-comment equivalent"))
+                elif "comments" not in raw and (refreshed.num_comments != 0):
+                    comments, comment_gaps, comment_records = self._bounded_comments(refreshed, config)
+                    refreshed.comments = comments
+                    gaps.extend(comment_gaps)
+                    records.extend(comment_records)
+                if len(refreshed.comments) > config.comment_limit and config.comments_mode == "bounded":
+                    refreshed.comments = refreshed.comments[: config.comment_limit]
+                    gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail=f"normalized at most comment_limit={config.comment_limit}; no pagination requested"))
+                count_gap = comment_count_gap(refreshed, expected_num_comments=post.num_comments)
+                if count_gap and not any(gap.entity_id == post.post_id and gap.reason == "unexpanded" for gap in gaps):
+                    gaps.append(count_gap)
+                all_posts.append(refreshed)
+                if batch_record is not None:
+                    observation_requests[post.post_id] = batch_record
+        primary = next((record for record in records if record.operation == "refresh"), None)
+        metadata = {
+            "comments_mode": config.comments_mode,
+            "comments_expanded": _comments_complete(gaps),
+            "no_automatic_retries": True,
+            "post_dataset_id": self.posts_dataset_id,
+            "comment_dataset_id": self.comments_dataset_id,
+            "request_count": len(records),
+            "record_count": len(all_posts),
+        }
+        return RefreshResult(
+            all_posts,
+            utc_now(),
+            primary.request_id if primary else request_id if 'request_id' in locals() else None,
+            primary.response_status if primary else response.status if 'response' in locals() and response else None,
+            "unknown" if primary else None,
+            None,
+            gaps,
+            metadata,
+            records,
+            observation_requests,
+        )
+
+
 def make_provider(config: Config) -> Provider:
     if config.provider == "fixture":
         if config.fixture_path is None:
@@ -867,4 +1511,6 @@ def make_provider(config: Config) -> Provider:
         return RedditApisProvider(config)
     if config.provider == "fetchlayer":
         return FetchLayerProvider(config)
-    raise ValueError(f"unknown provider {config.provider!r}; choose fixture, redditapis, or fetchlayer")
+    if config.provider == "brightdata":
+        return BrightDataProvider(config)
+    raise ValueError(f"unknown provider {config.provider!r}; choose fixture, redditapis, fetchlayer, or brightdata")

@@ -13,7 +13,8 @@ depth = 1
 limit = 20
 
 [provider]
-# fixture, redditapis, or fetchlayer
+# fixture, redditapis, fetchlayer, or brightdata
+# Bright Data is disabled unless selected explicitly and BRIGHTDATA_API_KEY is set.
 name = "fixture"
 fixture_path = "fixtures/sample.json"
 request_timeout_seconds = 30

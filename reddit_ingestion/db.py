@@ -225,7 +225,7 @@ class Database:
         for gap in page.gaps:
             self._save_gap(run_id, provider, gap, page.observed_at, subreddit=subreddit)
         blocked = page.metadata.get("blocked") or any(gap.entity_type == "listing" and gap.reason == "blocked" for gap in page.gaps)
-        listing_failed = any(gap.entity_type == "listing" and gap.reason == "provider_error" for gap in page.gaps)
+        listing_failed = any(gap.entity_type == "listing" and gap.reason in {"provider_error", "unavailable", "unsupported"} for gap in page.gaps)
         provider_incomplete = listing_status in {"truncated", "unknown"} or page.metadata.get("checkpoint_deferred") or listing_failed
         if not page.metadata.get("request_failed") and not page.metadata.get("checkpoint_deferred") and not blocked and not provider_incomplete:
             self.connection.execute(

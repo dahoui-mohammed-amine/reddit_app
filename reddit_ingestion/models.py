@@ -112,6 +112,7 @@ class ProviderStatus:
     paid_calls_possible: bool
     supports_refresh_batch: bool = False
     refresh_batch_size: int = 1
+    capabilities: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

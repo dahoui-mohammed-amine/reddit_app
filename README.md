@@ -28,11 +28,11 @@ Copy `config.example.toml` and edit the explicit `[ingestion]`, `[comments]`, an
 - `refresh_expiry_days` sets each post's refresh-until window from its source creation time when available, falling back to observation time; expired posts remain stored with their history but are no longer refreshed.
 - `comments.mode` is `bounded` or `full`. Bounded mode records explicit gaps when depth/limit truncates comments. Full mode is opt-in; FetchLayer reports full expansion as unsupported.
 - `provider.min_request_interval_seconds` paces live requests before each attempt; retry backoff and provider retry-after values still apply.
-- `provider.name` is `fixture`, `redditapis`, or `fetchlayer`.
+- `provider.name` is `fixture`, `redditapis`, `fetchlayer`, or `brightdata`; fixture remains the safe default.
 
 ## Provider access and cost gate
 
-The app contains configuration seams for the two researched low-cost providers, but does not claim live access:
+The app contains configuration seams for the researched providers, including the opt-in Bright Data Reddit Scraper API, but does not claim live access:
 
 ```sh
 # Edit config.toml first: [provider] name = "redditapis".
@@ -43,9 +43,18 @@ uv run reddit-ingest run --config config.toml --mode discover --allow-paid
 # Edit config.toml first: [provider] name = "fetchlayer".
 export FETCHLAYER_API_KEY='...'
 uv run reddit-ingest run --config config.toml --mode discover --allow-paid
+
+# Bright Data Reddit Scraper API (Bearer token; no automatic retries).
+# Edit config.toml first: [provider] name = "brightdata".
+export BRIGHTDATA_API_KEY='...'
+uv run reddit-ingest run --config config.toml --mode discover --allow-paid
 ```
 
 No call occurs unless the selected provider's key exists and `--allow-paid` is supplied. Missing credentials are reported as a provider-access error. The application never automatically falls back from one provider to another, and it never silently expands every comment. Review the plan and provider terms first; no real secrets belong in this repository.
+
+Bright Data uses the documented Reddit dataset IDs `gd_lvz8ah06191smkebj4` (posts/discovery) and `gd_lvzdpsdlw09j6t702` (comments), with `POST /datasets/v3/scrape` and an `{"input": [...]}` body. Subreddit discovery batches up to 20 subreddit URLs with `sort_by = "new"`; it does not invent cursors or pagination. Discovery does not fan out to comments. Bounded refresh comments make at most one comments-dataset request per post, cap normalized records locally, and retain an explicit gap when provider completeness is unknown. Full comments and asynchronous `202` snapshots are reported as unsupported rather than polled.
+
+Bright Data request records retain the request body, raw JSON response/error, `fetched_at`, dataset ID, requested-input count, returned-record count, and provider-error count. These are request-versus-record observations only; undocumented billing/credit semantics are never estimated.
 
 The RedditAPIs adapter uses the documented subreddit listing and up-to-100 `t3_` fullname batch refresh shape. The FetchLayer adapter uses subreddit-post and one-post-URL endpoints; its full comment expansion is unsupported and records an explicit unexpanded gap while still refreshing post metrics. Provider responses retain cache/status metadata where supplied. Score and comment-count changes are observations, not exact vote-arrival rates.
 
