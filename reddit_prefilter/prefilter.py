@@ -226,6 +226,11 @@ def _canonical_parent_id(value: Any) -> str | None:
     return candidate if _IDENTIFIER_RE.fullmatch(candidate) else None
 
 
+def _strip_subreddit_prefix(value: str) -> str:
+    result = value.strip()
+    return result[2:] if result.casefold().startswith("r/") else result
+
+
 def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, str, tuple[str, ...]]:
     raw_value = raw.get("subreddit")
     context_value = record.subreddit
@@ -238,15 +243,19 @@ def _subreddit(record: RawRecord, raw: Mapping[str, Any]) -> tuple[str | None, s
         return None, "invalid", ("INVALID_SUBREDDIT",)
     if raw_supplied and not _present(raw_value):
         return None, "invalid", ("INVALID_SUBREDDIT",)
+    if raw_supplied:
+        normalized_raw = _strip_subreddit_prefix(raw_value)
+        if not normalized_raw or any(char.isspace() for char in normalized_raw):
+            return None, "invalid", ("INVALID_SUBREDDIT",)
     if _present(raw_value) and _present(context_value):
-        raw_subreddit = str(raw_value).strip().casefold().removeprefix("r/")
-        context_subreddit = str(context_value).strip().casefold().removeprefix("r/")
+        raw_subreddit = _strip_subreddit_prefix(raw_value).casefold()
+        context_subreddit = _strip_subreddit_prefix(context_value).casefold()
         if raw_subreddit != context_subreddit:
             reasons.append("SUBREDDIT_CONFLICT")
     value = raw_value if raw_supplied else context_value
     if not _present(value):
         return None, "unavailable", tuple(reasons)
-    result = str(value).strip().removeprefix("r/")
+    result = _strip_subreddit_prefix(value)
     if not result or any(char.isspace() for char in result):
         reasons.append("INVALID_SUBREDDIT")
         return None, "invalid", tuple(reasons)
@@ -359,7 +368,7 @@ class Prefilter:
 
     @staticmethod
     def _normalize_subreddit(value: str) -> str:
-        return value.strip().casefold().removeprefix("r/")
+        return _strip_subreddit_prefix(value).casefold()
 
     def evaluate(self, records: Iterable[RawRecord]) -> PrefilterResult:
         """Return one decision per input while retaining every raw record.

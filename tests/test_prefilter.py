@@ -550,6 +550,31 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(serialized["records"][1]["lineage"], {"provider": 0})
         self.assertEqual(serialized["decisions"][0]["lineage"], {"provider": None})
 
+    def test_non_string_mapping_keys_remain_distinct_evidence(self) -> None:
+        mixed_raw = RawRecord(
+            "post",
+            {1: "numeric key", "1": "string key", "id": "post-mixed-keys", "title": "Enough"},
+            self.lineage,
+        )
+        string_raw = RawRecord(
+            "post",
+            {"1": "string key", "id": "post-mixed-keys", "title": "Enough"},
+            self.lineage,
+        )
+        mixed_lineage = SourceLineage(
+            provider="fixture",
+            observed_at="2026-09-05T00:00:00Z",
+            metadata={1: "numeric key", "1": "string key"},
+        )
+
+        result = Prefilter().evaluate(
+            (mixed_raw, string_raw, RawRecord("post", {"id": "post-mixed-lineage", "title": "Enough"}, mixed_lineage))
+        )
+
+        self.assertNotEqual(result.decisions[0].evidence_id, result.decisions[1].evidence_id)
+        self.assertEqual(result.decisions[2].status, "accepted")
+        self.assertEqual(len(result.decisions[2].evidence_id), 64)
+
     def test_surrogate_content_keeps_evidence_hashes_nonempty(self) -> None:
         record = RawRecord(
             "post",
@@ -681,6 +706,29 @@ class PrefilterTests(unittest.TestCase):
                 "freelance",
             )
             for index, value in enumerate(("", "   "))
+        )
+
+        for config in (PrefilterConfig(), PrefilterConfig(subreddit_scope=("freelance",))):
+            with self.subTest(config=config):
+                decisions = Prefilter(config).evaluate(records).decisions
+
+                self.assertEqual(
+                    [decision.status for decision in decisions],
+                    ["incomplete", "incomplete"],
+                )
+                self.assertEqual(
+                    [decision.reason_codes for decision in decisions],
+                    [("INVALID_SUBREDDIT",), ("INVALID_SUBREDDIT",)],
+                )
+
+    def test_uppercase_empty_subreddit_prefix_is_invalid(self) -> None:
+        records = tuple(
+            RawRecord(
+                "post",
+                {"id": f"post-uppercase-empty-{index}", "subreddit": "R/", "title": "Enough"},
+                self.lineage,
+            )
+            for index in range(2)
         )
 
         decisions = Prefilter(PrefilterConfig(subreddit_scope=("freelance",))).evaluate(

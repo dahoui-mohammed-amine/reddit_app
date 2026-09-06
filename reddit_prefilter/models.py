@@ -11,18 +11,47 @@ RecordType = Literal["post", "comment"]
 DecisionStatus = Literal["accepted", "rejected", "incomplete"]
 
 
+def _canonical_dump(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _canonicalize(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        if all(isinstance(key, str) for key in value):
+            return {key: _canonicalize(item) for key, item in value.items()}
+        entries = [
+            {
+                "key_type": f"{type(key).__module__}.{type(key).__qualname__}",
+                "key": _canonicalize(key),
+                "value": _canonicalize(item),
+            }
+            for key, item in value.items()
+        ]
+        entries.sort(key=lambda entry: (entry["key_type"], _canonical_dump(entry["key"])))
+        return {"__mapping__": entries}
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        items = [_canonicalize(item) for item in value]
+        return sorted(items, key=_canonical_dump)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return {"type": type(value).__name__, "value": str(value)}
+
+
 def _json_default(value: Any) -> Any:
     """Keep evidence IDs deterministic for values outside the JSON contract."""
-    if isinstance(value, Mapping):
-        return {str(key): item for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return {"type": type(value).__name__, "value": str(value)}
+    return _canonicalize(value)
 
 
 def canonical_json(value: Any) -> str:
     return json.dumps(
-        value,
+        _canonicalize(value),
         default=_json_default,
         ensure_ascii=True,
         sort_keys=True,
