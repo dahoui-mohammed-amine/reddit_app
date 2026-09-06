@@ -64,7 +64,7 @@ It never silently expands every comment.
 Review the plan and provider terms first.
 No real secrets belong in this repository.
 
-The RedditAPIs adapter uses the documented subreddit listing and up-to-100 `t3_` fullname batch refresh shape.
+The RedditAPIs adapter uses the documented subreddit listing and up-to-100 `t3_` fullname batch refresh shape. Its documented `upvotes` net-vote field maps to canonical `score`, `comments` maps to canonical `num_comments`, and the observed `ups` value remains separate; unsupported metric names stay unknown. Its comment adapter unwraps documented native `t1`/`data` nodes and nested `Listing` replies, preserving `id`/`name`, `link_id`, `parent_id`, timestamps, scores, and deletion markers. Documented `more` nodes remain explicit incomplete-comment gaps.
 The FetchLayer adapter uses subreddit-post and one-post-URL endpoints.
 Its full comment expansion is unsupported and records an explicit unexpanded gap while still refreshing post metrics.
 Provider responses retain cache and status metadata where supplied.

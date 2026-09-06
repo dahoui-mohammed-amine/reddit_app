@@ -1,0 +1,127 @@
+{
+  "listing": {
+    "posts": [
+      {
+        "id": "ra_post",
+        "name": "t3_ra_post",
+        "title": "A documented RedditAPIs post",
+        "author": "post_author",
+        "permalink": "/r/freelance/comments/ra_post/documented/",
+        "url": "https://reddit.com/r/freelance/comments/ra_post/documented/",
+        "link_url": null,
+        "text": "The documented body.",
+        "subreddit": "freelance",
+        "upvotes": 42,
+        "ups": 45,
+        "comments": 2,
+        "upvote_ratio": 0.96,
+        "locked": false,
+        "created_utc": 1779445765,
+        "created": "2026-05-22T10:29:25.000Z"
+      }
+    ],
+    "after": null,
+    "listing_status": "complete"
+  },
+  "bulk": {
+    "posts": [
+      {
+        "id": "ra_post",
+        "name": "t3_ra_post",
+        "title": "A documented RedditAPIs post",
+        "author": "post_author",
+        "permalink": "/r/freelance/comments/ra_post/documented/",
+        "url": "https://reddit.com/r/freelance/comments/ra_post/documented/",
+        "text": "The documented body.",
+        "subreddit": "freelance",
+        "upvotes": 45,
+        "ups": 48,
+        "comments": 4,
+        "upvote_ratio": 0.97,
+        "created_utc": 1779445765,
+        "created": "2026-05-22T10:29:25.000Z"
+      }
+    ],
+    "listing_status": "complete"
+  },
+  "comments": {
+    "post": {
+      "id": "ra_post",
+      "name": "t3_ra_post"
+    },
+    "comments": [
+      {
+        "kind": "t1",
+        "data": {
+          "id": "ra_comment",
+          "name": "t1_ra_comment",
+          "author": "comment_author",
+          "body": "A top-level comment.",
+          "score": 7,
+          "ups": 8,
+          "link_id": "t3_ra_post",
+          "parent_id": "t3_ra_post",
+          "created_utc": 1779445800,
+          "replies": {
+            "kind": "Listing",
+            "data": {
+              "children": [
+                {
+                  "kind": "t1",
+                  "data": {
+                    "id": "ra_reply",
+                    "name": "t1_ra_reply",
+                    "author": "reply_author",
+                    "body": "A nested reply.",
+                    "score": 3,
+                    "ups": 4,
+                    "link_id": "t3_ra_post",
+                    "parent_id": "t1_ra_comment",
+                    "created_utc": 1779445860,
+                    "replies": ""
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "kind": "t1",
+        "data": {
+          "id": "ra_deleted",
+          "name": "t1_ra_deleted",
+          "author": null,
+          "body": "[deleted]",
+          "link_id": "t3_ra_post",
+          "parent_id": "t3_ra_post",
+          "created_utc": 1779445900,
+          "replies": ""
+        }
+      },
+      {
+        "kind": "t1",
+        "data": {
+          "id": "ra_removed",
+          "name": "t1_ra_removed",
+          "author": "moderator",
+          "body": "[removed]",
+          "link_id": "t3_ra_post",
+          "parent_id": "t3_ra_post",
+          "created_utc": 1779445920,
+          "replies": ""
+        }
+      },
+      {
+        "kind": "more",
+        "data": {
+          "count": 2,
+          "children": ["ra_missing_1", "ra_missing_2"]
+        }
+      }
+    ],
+    "after": null,
+    "listing_status": "truncated",
+    "exhausted_reason": "comment_tree_more"
+  }
+}

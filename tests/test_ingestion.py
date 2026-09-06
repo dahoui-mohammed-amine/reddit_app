@@ -21,6 +21,7 @@ from reddit_ingestion.runner import check_live_access, plan_for, run_once
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample.json"
+REDDITAPIS_FIXTURE = Path(__file__).parents[1] / "fixtures" / "redditapis_response.json"
 
 
 def config(tmp: Path, *, comments: str = "bounded", limit: int = 20, provider: str = "fixture") -> Config:
@@ -880,10 +881,10 @@ class IngestionTests(unittest.TestCase):
                 if "/by_id/" in url:
                     return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 3}]}, HttpResponse(200, {}, b""), "post-request"
                 if "after=A" in url:
-                    return {"comments": [{"id": "c2", "name": "t1_c2", "body": "two"}], "after": "B"}, HttpResponse(200, {}, b""), "comment-request-a"
+                    return {"comments": [{"kind": "t1", "data": {"id": "c2", "name": "t1_c2", "body": "two"}}], "after": "B"}, HttpResponse(200, {}, b""), "comment-request-a"
                 if "after=B" in url:
-                    return {"comments": [{"id": "c3", "name": "t1_c3", "body": "three"}], "after": "A"}, HttpResponse(200, {}, b""), "comment-request-b"
-                return {"comments": [{"id": "c1", "name": "t1_c1", "body": "one"}], "after": "A"}, HttpResponse(200, {}, b""), "comment-request-first"
+                    return {"comments": [{"kind": "t1", "data": {"id": "c3", "name": "t1_c3", "body": "three"}}], "after": "A"}, HttpResponse(200, {}, b""), "comment-request-b"
+                return {"comments": [{"kind": "t1", "data": {"id": "c1", "name": "t1_c1", "body": "one"}}], "after": "A"}, HttpResponse(200, {}, b""), "comment-request-first"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
             cfg = config(Path(directory), provider="redditapis", comments="full")
@@ -898,7 +899,7 @@ class IngestionTests(unittest.TestCase):
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
                 if "/by_id/" in url:
                     return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 2}]}, HttpResponse(200, {}, b""), "post-request"
-                comment = {"id": "c1", "name": "t1_c1", "body": "one"}
+                comment = {"kind": "t1", "data": {"id": "c1", "name": "t1_c1", "body": "one"}}
                 if "after=A" in url:
                     return {"comments": [comment]}, HttpResponse(200, {}, b""), "comment-request-second"
                 return {"comments": [comment], "after": "A"}, HttpResponse(200, {}, b""), "comment-request-first"
@@ -918,7 +919,7 @@ class IngestionTests(unittest.TestCase):
                 if "/by_id/" in url:
                     return {"posts": [{"id": "p", "name": "t3_p", "num_comments": 1}]}, HttpResponse(200, {}, b""), "post-request"
                 self.comment_calls += 1
-                return {"comments": [{"id": "c", "name": "t1_c", "body": "one"}], "after": "next", "listing_status": "truncated"}, HttpResponse(200, {}, b""), "comment-request"
+                return {"comments": [{"kind": "t1", "data": {"id": "c", "name": "t1_c", "body": "one"}}], "after": "next", "listing_status": "truncated"}, HttpResponse(200, {}, b""), "comment-request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
             cfg = config(Path(directory), provider="redditapis", comments="full")
@@ -1138,7 +1139,7 @@ class IngestionTests(unittest.TestCase):
                 self.urls.append(url)
                 if "/by_id/" in url:
                     return {"posts": [{"id": "p", "name": "t3_p", "title": "Post", "num_comments": 1}]}, HttpResponse(200, {}, b""), "post-request"
-                return {"comments": [{"id": "c", "name": "t1_c", "body": "Comment", "parent_id": "t3_p"}]}, HttpResponse(200, {}, b""), "comment-request"
+                return {"comments": [{"kind": "t1", "data": {"id": "c", "name": "t1_c", "body": "Comment", "parent_id": "t3_p"}}]}, HttpResponse(200, {}, b""), "comment-request"
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
             cfg = config(Path(directory), provider="redditapis", limit=1)
@@ -1148,6 +1149,115 @@ class IngestionTests(unittest.TestCase):
             self.assertIn("limit=1", client.urls[1])
             self.assertEqual([record.operation for record in result.request_records], ["refresh", "comments"])
             self.assertEqual(result.observation_requests["p"].request_id, "post-request")
+
+    def test_redditapis_documented_fixture_maps_metrics_and_nested_comments(self) -> None:
+        fixture_payload = json.loads(REDDITAPIS_FIXTURE.read_text(encoding="utf-8"))
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/posts?" in url:
+                    return fixture_payload["listing"], HttpResponse(200, {}, b""), "listing-request"
+                if "/by_id/" in url:
+                    return fixture_payload["bulk"], HttpResponse(200, {}, b""), "bulk-request"
+                return fixture_payload["comments"], HttpResponse(200, {}, b""), "comments-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis", comments="full")
+            provider = RedditApisProvider(cfg, client=Client())
+            page = provider.discover("freelance", None, cfg)
+            listed = page.posts[0]
+            self.assertEqual((listed.score, listed.ups, listed.upvote_ratio, listed.num_comments), (42, 45, 0.96, 2))
+            self.assertEqual(listed.body, "The documented body.")
+            self.assertIsNotNone(listed.created_at)
+
+            result = provider.refresh_posts([listed], cfg)
+            post = result.posts[0]
+            self.assertEqual((post.score, post.ups, post.upvote_ratio, post.num_comments), (45, 48, 0.97, 4))
+            self.assertEqual(post.created_at, str(fixture_payload["bulk"]["posts"][0]["created_utc"]))
+            self.assertEqual([comment.comment_id for comment in post.comments], ["ra_comment", "ra_reply", "ra_deleted", "ra_removed"])
+            self.assertEqual([comment.fullname for comment in post.comments], ["t1_ra_comment", "t1_ra_reply", "t1_ra_deleted", "t1_ra_removed"])
+            self.assertEqual((post.comments[0].post_id, post.comments[0].parent_id), ("ra_post", "t3_ra_post"))
+            self.assertEqual((post.comments[1].post_id, post.comments[1].parent_id), ("ra_post", "t1_ra_comment"))
+            self.assertTrue(post.comments[0].created_at)
+            self.assertTrue(post.comments[0].observed_at)
+            self.assertTrue(post.comments[2].deleted)
+            self.assertTrue(post.comments[3].removed)
+            self.assertFalse(any(comment.comment_id in {"ra_missing_1", "ra_missing_2"} for comment in post.comments))
+            self.assertTrue(any(gap.reason == "unexpanded" for gap in result.gaps))
+
+    def test_redditapis_does_not_guess_unsupported_metrics_or_flat_comments(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {
+                        "posts": [
+                            {
+                                "id": "unsupported",
+                                "name": "t3_unsupported",
+                                "score": 99,
+                                "num_comments": 9,
+                                "votes": 101,
+                                "comment_total": 9,
+                                "ups": 101,
+                            }
+                        ]
+                    }, HttpResponse(200, {}, b""), "bulk-request"
+                return {"comments": [{"id": "flat", "name": "t1_flat", "body": "not a documented node"}]}, HttpResponse(200, {}, b""), "comments-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis")
+            result = RedditApisProvider(cfg, client=Client()).refresh_posts([PostSnapshot("unsupported", "t3_unsupported", "freelance")], cfg)
+            post = result.posts[0]
+            self.assertIsNone(post.score)
+            self.assertIsNone(post.num_comments)
+            self.assertEqual(post.ups, 101)
+            self.assertEqual(post.comments, [])
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in result.gaps))
+            self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "unexpanded" for gap in result.gaps))
+
+    def test_redditapis_rejects_contradictory_metric_and_comment_aliases(self) -> None:
+        class ContradictoryPostClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                return {"posts": [{"id": "p", "name": "t3_p", "upvotes": 3, "score": 4}]}, HttpResponse(200, {}, b""), "bulk-request"
+
+        class ContradictoryCommentClient:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/by_id/" in url:
+                    return {"posts": [{"id": "p", "name": "t3_p", "upvotes": 3, "comments": 1}]}, HttpResponse(200, {}, b""), "bulk-request"
+                return {
+                    "comments": [
+                        {
+                            "kind": "t1",
+                            "data": {"id": "c", "name": "t1_other", "link_id": "t3_p", "parent_id": "t3_p"},
+                        }
+                    ]
+                }, HttpResponse(200, {}, b""), "comments-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"REDDITAPIS_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="redditapis")
+            contradictory_post = RedditApisProvider(cfg, client=ContradictoryPostClient()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertEqual(contradictory_post.posts, [])
+            self.assertTrue(any("score aliases disagree" in (gap.detail or "") for gap in contradictory_post.gaps))
+
+            contradictory_comment = RedditApisProvider(cfg, client=ContradictoryCommentClient()).refresh_posts([PostSnapshot("p", "t3_p", "freelance")], cfg)
+            self.assertEqual(contradictory_comment.posts[0].comments, [])
+            self.assertTrue(any("comment id and fullname disagree" in (gap.detail or "") for gap in contradictory_comment.gaps))
+
+    def test_fixture_and_fetchlayer_normalization_paths_remain_provider_agnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            root = Path(directory)
+            fixture_page = FixtureProvider(FIXTURE).discover("freelance", None, config(root))
+            self.assertEqual((fixture_page.posts[0].score, fixture_page.posts[0].num_comments), (12, 2))
+
+            class Client:
+                def request(self, *args: object, **kwargs: object) -> tuple[dict[str, object], HttpResponse, str]:
+                    return {"id": "p", "name": "t3_p", "score": 7, "num_comments": 1, "comments": []}, HttpResponse(200, {}, b""), "fetch-request"
+
+            fetch_cfg = config(root, provider="fetchlayer")
+            fetched = FetchLayerProvider(fetch_cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "freelance", permalink="/r/freelance/comments/p/post/")], fetch_cfg
+            )
+            self.assertEqual((fetched.posts[0].score, fetched.posts[0].num_comments), (7, 1))
 
     def test_fetchlayer_full_comments_report_unsupported_without_calling_provider(self) -> None:
         class Client:

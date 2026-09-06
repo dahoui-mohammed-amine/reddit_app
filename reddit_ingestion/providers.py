@@ -269,12 +269,46 @@ def _malformed_gap(entity_type: str, *, entity_id: str | None = None, subreddit:
     return Gap(entity_type, "provider_error", entity_id=entity_id, subreddit=subreddit, detail=f"malformed provider payload: {detail}")
 
 
+def _same_metric_value(left: Any, right: Any) -> bool:
+    if isinstance(left, (int, float)) and not isinstance(left, bool) and isinstance(right, (int, float)) and not isinstance(right, bool):
+        return float(left) == float(right)
+    return left == right
+
+
+def _redditapis_post_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate only fields documented by RedditAPIs into canonical names.
+
+    RedditAPIs calls the canonical post score ``upvotes`` (net votes) and the
+    canonical comment count ``comments``.  Its observed ``ups`` field is kept
+    as the separate raw up-vote value; it is not used as ``score``.
+    """
+
+    mapped = dict(raw)
+    if "upvotes" in raw and "score" in raw and raw["score"] not in (None, "") and raw["upvotes"] not in (None, "") and not _same_metric_value(raw["score"], raw["upvotes"]):
+        raise ValueError("RedditAPIs post score aliases disagree")
+    if "comments" in raw and "num_comments" in raw and raw["num_comments"] not in (None, "") and raw["comments"] not in (None, "") and not _same_metric_value(raw["num_comments"], raw["comments"]):
+        raise ValueError("RedditAPIs post comment-count aliases disagree")
+
+    # These names are not part of the RedditAPIs post contract.  Do not let
+    # the generic normalizer turn an undocumented field into a canonical fact.
+    for key in ("score", "num_comments", "commentCount", "comment_count"):
+        mapped.pop(key, None)
+    if "upvotes" in raw:
+        mapped["score"] = raw["upvotes"]
+    if "comments" in raw:
+        mapped["num_comments"] = raw["comments"]
+    if "text" in raw and "selftext" not in raw and "body" not in raw and "bodyText" not in raw:
+        mapped["selftext"] = raw["text"]
+    return mapped
+
+
 def _parse_post_items(
     items: Any,
     *,
     default_subreddit: str | None,
     observed_at: str,
     include_comments: bool,
+    post_mapper: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> tuple[list[PostSnapshot], list[Gap]]:
     if not isinstance(items, list):
         return [], [_malformed_gap("listing", subreddit=default_subreddit, detail="post collection is not a list")]
@@ -287,8 +321,9 @@ def _parse_post_items(
             continue
         comment_errors: list[Exception] = []
         try:
+            source = post_mapper(item) if post_mapper else item
             post = parse_post(
-                item,
+                source,
                 default_subreddit=default_subreddit,
                 observed_at=observed_at,
                 include_comments=include_comments,
@@ -337,6 +372,82 @@ def _parse_comment_items(items: Any, *, post: PostSnapshot, observed_at: str) ->
                 comments.append(comment)
         except (TypeError, ValueError) as exc:
             gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
+    return comments, gaps
+
+
+def _redditapis_comment_payload(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Unwrap a documented native Reddit ``t1`` node without inventing fields."""
+
+    documented_fields = {
+        "id",
+        "name",
+        "author",
+        "body",
+        "score",
+        "ups",
+        "link_id",
+        "parent_id",
+        "created_utc",
+        "created",
+        "permalink",
+        "depth",
+        "deleted",
+        "removed",
+    }
+    return {key: value for key, value in data.items() if key in documented_fields}
+
+
+def _parse_redditapis_comment_items(items: Any, *, post: PostSnapshot, observed_at: str) -> tuple[list[Any], list[Gap]]:
+    """Flatten RedditAPIs' documented ``kind``/``data`` comment tree.
+
+    ``t1`` nodes are comments, ``more`` nodes are explicit evidence that the
+    provider omitted comments.  Neither a ``more`` child id nor an array
+    position is a usable comment observation.
+    """
+
+    comments: list[Any] = []
+    seen_comment_ids: set[str] = set()
+    gaps: list[Gap] = []
+
+    def visit(nodes: Any) -> None:
+        if not isinstance(nodes, list):
+            gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail="RedditAPIs comment children are not a list"))
+            return
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail="RedditAPIs comment node is not an object"))
+                continue
+            kind = node.get("kind")
+            if kind == "more":
+                data = node.get("data")
+                if not isinstance(data, Mapping) or not isinstance(data.get("children"), list):
+                    gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail="RedditAPIs more node is missing its children list"))
+                else:
+                    gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="RedditAPIs more node identifies comments omitted from the response"))
+                continue
+            if kind != "t1":
+                gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail=f"RedditAPIs returned unsupported comment kind {kind!r}"))
+                continue
+            data = node.get("data")
+            if not isinstance(data, Mapping):
+                gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail="RedditAPIs t1 node is missing its data object"))
+                continue
+            try:
+                comment = parse_comment(_redditapis_comment_payload(data), post=post, observed_at=observed_at)
+                if comment.comment_id not in seen_comment_ids:
+                    seen_comment_ids.add(comment.comment_id)
+                    comments.append(comment)
+            except (TypeError, ValueError) as exc:
+                gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
+            replies = data.get("replies")
+            if replies in (None, ""):
+                continue
+            if not isinstance(replies, Mapping) or replies.get("kind") != "Listing" or not isinstance(replies.get("data"), Mapping):
+                gaps.append(_malformed_gap("comment", entity_id=post.post_id, subreddit=post.subreddit, detail="RedditAPIs t1 replies are not a Listing object"))
+                continue
+            visit(replies["data"].get("children"))
+
+    visit(items)
     return comments, gaps
 
 
@@ -522,7 +633,13 @@ class RedditApisProvider(HttpProviderBase):
         blocked = bool(payload.get("blocked"))
         cache_status, cache_observed_at = _cache_info(payload)
         raw_posts = payload.get("posts")
-        posts, parse_gaps = ([], []) if blocked else _parse_post_items(raw_posts, default_subreddit=subreddit, observed_at=observed, include_comments=False)
+        posts, parse_gaps = ([], []) if blocked else _parse_post_items(
+            raw_posts,
+            default_subreddit=subreddit,
+            observed_at=observed,
+            include_comments=False,
+            post_mapper=_redditapis_post_payload,
+        )
         gaps: list[Gap] = parse_gaps
         if blocked:
             gaps.append(Gap("listing", "blocked", subreddit=subreddit, detail=str(payload.get("blockReason"))))
@@ -601,7 +718,7 @@ class RedditApisProvider(HttpProviderBase):
             if not isinstance(raw_comments, list):
                 gaps.append(Gap("comment", "unexpanded", entity_id=post.post_id, subreddit=post.subreddit, detail="provider returned no comment list"))
                 break
-            parsed_comments, parse_gaps = _parse_comment_items(raw_comments, post=post, observed_at=observed)
+            parsed_comments, parse_gaps = _parse_redditapis_comment_items(raw_comments, post=post, observed_at=observed)
             for comment in parsed_comments:
                 if comment.comment_id not in seen_comment_ids:
                     seen_comment_ids.add(comment.comment_id)
@@ -670,7 +787,7 @@ class RedditApisProvider(HttpProviderBase):
                     gaps.append(Gap("post", "not_returned", entity_id=post.post_id, subreddit=post.subreddit))
                 else:
                     try:
-                        refreshed = parse_post(raw, default_subreddit=post.subreddit, observed_at=utc_now(), include_comments=False)
+                        refreshed = parse_post(_redditapis_post_payload(raw), default_subreddit=post.subreddit, observed_at=utc_now(), include_comments=False)
                     except (TypeError, ValueError) as exc:
                         gaps.append(_malformed_gap("post", entity_id=post.post_id, subreddit=post.subreddit, detail=str(exc)))
                         continue
