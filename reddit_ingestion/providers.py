@@ -309,8 +309,14 @@ def _malformed_gap(entity_type: str, *, entity_id: str | None = None, subreddit:
 
 def _report_only_state_gaps(raw: Mapping[str, Any], *, entity_id: str, subreddit: str | None) -> list[Gap]:
     gaps: list[Gap] = []
+    content_keys = ("author", "author_username", "user_posted", "body", "bodyText", "selftext", "text", "description", "comment")
+    content_markers = {
+        "deleted": {"[deleted]", "deleted"},
+        "removed": {"[removed]", "removed"},
+    }
     for reason, keys in (("deleted", ("deleted", "is_deleted")), ("removed", ("removed", "is_removed", "removed_by_category"))):
         markers = [key for key in keys if raw.get(key) not in (None, "", False)]
+        markers.extend(key for key in content_keys if isinstance(raw.get(key), str) and raw[key] in content_markers[reason])
         if markers:
             gaps.append(
                 Gap(
@@ -1090,6 +1096,10 @@ class BrightDataProvider(HttpProviderBase):
         return type(payload).__name__
 
     @classmethod
+    def _is_deferred_payload(cls, payload: Any) -> bool:
+        return isinstance(payload, list) or cls._response_shape(payload) == "snapshot"
+
+    @classmethod
     def _records_and_errors(cls, payload: Any) -> tuple[list[Any] | None, list[Any], str]:
         if isinstance(payload, list):
             return payload, [], "array"
@@ -1289,7 +1299,7 @@ class BrightDataProvider(HttpProviderBase):
         shared_error: Any = None
         snapshot_id: str | None = None
         malformed_shape: str | None = None
-        deferred_202 = response is not None and response.status == 202
+        deferred_202 = response is not None and response.status == 202 and self._is_deferred_payload(payload)
         unattributed_record = False
         returned_count = 0
         response_status = response.status if response else error.status if error else None
@@ -1473,12 +1483,16 @@ class BrightDataProvider(HttpProviderBase):
                 continue
             if response is not None and response.status == 202:
                 self._update_accounting(request_records, returned_records=0, provider_error_count=0)
-                snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
-                detail = "Bright Data returned deferred HTTP 202"
-                if snapshot_id is not None:
-                    detail += f" with async snapshot {snapshot_id!r}"
-                detail += "; snapshot polling is not enabled"
-                gaps.extend(Gap("post", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail=detail) for post, _ in batch)
+                if self._is_deferred_payload(payload):
+                    snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
+                    detail = "Bright Data returned deferred HTTP 202"
+                    if snapshot_id is not None:
+                        detail += f" with async snapshot {snapshot_id!r}"
+                    detail += "; snapshot polling is not enabled"
+                    gaps.extend(Gap("post", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail=detail) for post, _ in batch)
+                else:
+                    shape = self._response_shape(payload)
+                    gaps.extend(Gap("post", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=f"malformed provider payload: expected a JSON array or snapshot, got {shape}") for post, _ in batch)
                 continue
             raw_items, errors, shape = self._records_and_errors(payload)
             if shape == "snapshot":

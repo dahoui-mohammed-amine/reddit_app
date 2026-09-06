@@ -204,6 +204,24 @@ class BrightDataTests(unittest.TestCase):
         self.assertTrue(any(gap.reason == "removed" and gap.entity_id == "p" for gap in page.gaps))
         self.assertEqual(tuple(saved), ("A post", "A description", "author", 0, 0))
 
+    def test_brightdata_content_markers_are_report_only(self) -> None:
+        raw = post_record("smallbusiness")
+        raw.update({"description": "[deleted]", "user_posted": "[removed]", "comment": "deleted"})
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [raw], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            page = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+        self.assertFalse(page.posts[0].deleted)
+        self.assertFalse(page.posts[0].removed)
+        self.assertTrue(any(gap.reason == "deleted" and gap.entity_id == "p" for gap in page.gaps))
+        self.assertTrue(any(gap.reason == "removed" and gap.entity_id == "p" for gap in page.gaps))
+        self.assertTrue(page.metadata["checkpoint_deferred"])
+
     def test_sparse_records_are_valid_but_deleted_like_partial_errors_are_unavailable(self) -> None:
         sparse = {"post_id": "sparse", "url": "https://www.reddit.com/r/smallbusiness/comments/sparse/title/", "num_comments": 0}
         deleted_error = {"url": "https://www.reddit.com/r/freelance/", "error": "deleted post"}
@@ -372,6 +390,24 @@ class BrightDataTests(unittest.TestCase):
         self.assertTrue(any(gap.reason == "unsupported" for gap in result.gaps))
         self.assertEqual(result.request_records[0].metadata["raw_payload"], [post_record("smallbusiness")])
         self.assertEqual(result.request_records[0].metadata["accounting"]["returned_records"], 0)
+
+    def test_202_object_envelopes_are_malformed(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return self.payload, HttpResponse(202, {}, b""), "request"
+
+        for payload in ({"data": []}, {"records": []}, {"errors": []}):
+            with self.subTest(payload=payload):
+                Client.payload = payload
+                with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+                    cfg = config(Path(directory))
+                    page = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+                self.assertEqual(page.posts, [])
+                self.assertTrue(any(gap.reason == "provider_error" and "malformed" in (gap.detail or "") for gap in page.gaps))
+                self.assertFalse(any(gap.reason == "unsupported" for gap in page.gaps))
+                self.assertTrue(page.metadata["checkpoint_deferred"])
+                self.assertEqual(page.request_records[0].metadata["raw_payload"], payload)
 
     def test_http_errors_are_not_retried_and_preserve_provider_error(self) -> None:
         for status, expected_reason in ((400, "provider_error"), (401, "provider_error"), (403, "provider_error"), (404, "unavailable"), (429, "provider_error"), (500, "provider_error")):
