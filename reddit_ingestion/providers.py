@@ -1174,7 +1174,7 @@ class BrightDataProvider(HttpProviderBase):
                 if key in error
             ).casefold()
         else:
-            text = cls._error_text(error).casefold()
+            return False
         return any(term in text for term in ("deleted", "removed", "not found", "unavailable", "private", "restricted", "404"))
 
     @classmethod

@@ -622,6 +622,18 @@ class BrightDataTests(unittest.TestCase):
             self.assertEqual(result.metadata["provider_error_count"], 1, status)
             self.assertEqual(result.metadata["accounting"]["provider_error_count"], 1, status)
 
+    def test_non_json_error_text_cannot_imply_unavailable(self) -> None:
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            return HttpResponse(500, {}, b"/comments/p/deleted-project/")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            provider = BrightDataProvider(cfg, client=JsonClient(timeout=1, retries=0, transport=transport, sleep=lambda _: None))
+            result = provider.discover("smallbusiness", None, cfg)
+
+        self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+        self.assertFalse(any(gap.reason == "unavailable" for gap in result.gaps))
+
     def test_cursor_and_full_comments_are_explicitly_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
             root = Path(directory)
