@@ -275,6 +275,45 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(refresh_until, "2020-01-31T00:00:00Z")
             db.close()
 
+    def test_migration_seals_legacy_null_expiry_before_discovery(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                observed = "2026-09-06T00:00:00Z"
+                return PageResult(
+                    [PostSnapshot("p", "t3_p", subreddit, num_comments=0, observed_at=observed)],
+                    cursor,
+                    None,
+                    observed,
+                    "fixture://p",
+                    200,
+                    "request",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_path = root / "db.sqlite3"
+            db = Database(database_path)
+            source_time = "2026-09-01T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, source_time)
+            with db.transaction():
+                db.save_page(
+                    run_id,
+                    "fixture",
+                    "freelance",
+                    PageResult([PostSnapshot("p", "t3_p", "freelance", observed_at=source_time)], None, None, source_time, "fixture://p", 200, "request"),
+                )
+            db.close()
+            db = Database(database_path, 30)
+            migrated_expiry = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='p'").fetchone()[0]
+            self.assertEqual(migrated_expiry, "2026-10-01T00:00:00Z")
+            cfg = replace(config(root), subreddits=("freelance",), refresh_expiry_days=30)
+            run_once(db, Provider(), cfg, "discover")
+            refresh_until = db.connection.execute("SELECT refresh_until FROM posts WHERE post_id='p'").fetchone()[0]
+            self.assertEqual(refresh_until, migrated_expiry)
+            db.close()
+
     def test_partial_comment_results_do_not_delete_existing_comments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

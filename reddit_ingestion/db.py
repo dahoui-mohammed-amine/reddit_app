@@ -118,21 +118,36 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, refresh_expiry_days: int = 30):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.executescript(SCHEMA)
-        self._migrate_posts()
+        self._migrate_posts(max(1, int(refresh_expiry_days)))
         self._migrate_requests()
         self.connection.commit()
 
-    def _migrate_posts(self) -> None:
+    def _migrate_posts(self, refresh_expiry_days: int) -> None:
         columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(posts)")}
         if "refresh_until" not in columns:
             self.connection.execute("ALTER TABLE posts ADD COLUMN refresh_until TEXT")
+        self.connection.execute(
+            """UPDATE posts
+            SET refresh_until = strftime(
+                '%Y-%m-%dT%H:%M:%SZ',
+                datetime(
+                    CASE
+                        WHEN created_at IS NOT NULL THEN COALESCE(datetime(created_at), datetime(created_at, 'unixepoch'))
+                        ELSE datetime(observed_at)
+                    END,
+                    '+' || ? || ' days'
+                )
+            )
+            WHERE refresh_until IS NULL AND observed_at IS NOT NULL""",
+            (refresh_expiry_days,),
+        )
 
     def _migrate_requests(self) -> None:
         columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(requests)")}

@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
             plan = provider.plan(config, known_posts, resume_pages=resume_pages, mode=args.mode)
             print(json.dumps({"status": "dry_run", "provider": asdict(status), "database": str(config.database_path), "plan": json.loads(render_plan(plan))}, indent=2))
             return 0
-        db = Database(config.database_path)
+        db = Database(config.database_path, config.refresh_expiry_days)
         plan = plan_for(db, provider, config, mode=args.mode)
         if args.command == "status":
             print(json.dumps({"provider": asdict(status), "database": str(config.database_path), "counts": db.counts(), "subreddits": list(config.subreddits)}, indent=2))
