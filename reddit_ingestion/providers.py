@@ -1234,15 +1234,19 @@ class BrightDataProvider(HttpProviderBase):
         )
         by_subreddit: dict[str, list[Mapping[str, Any]]] = {self._subreddit_key(subreddit): [] for subreddit in batch}
         errors: list[Any] = []
-        shared_gaps: list[Gap] = []
         shared_error: Any = None
         snapshot_id: str | None = None
         malformed_shape: str | None = None
+        deferred_202 = response is not None and response.status == 202
         unattributed_record = False
         returned_count = 0
         response_status = response.status if response else error.status if error else None
         if error is not None:
             shared_error = error.provider_payload if error.provider_payload is not None else str(error)
+        elif deferred_202:
+            self._update_accounting(request_records, returned_records=0, provider_error_count=0)
+            if isinstance(payload, dict):
+                snapshot_id = payload.get("snapshot_id")
         else:
             raw_records, errors, shape = self._records_and_errors(payload)
             returned_count = len(raw_records or [])
@@ -1278,9 +1282,15 @@ class BrightDataProvider(HttpProviderBase):
             )
             if config.comments_mode in {"bounded", "full"}:
                 parse_gaps.extend(self._comments_unsupported_gap(post, config.comments_mode) for post in posts)
-            gaps = list(shared_gaps) + parse_gaps
+            gaps = parse_gaps
             if shared_error is not None:
                 gaps.append(self._provider_gap("listing", entity_id=None, subreddit=subreddit, error=shared_error, status=error.status if error else None))
+            elif deferred_202:
+                detail = "Bright Data returned deferred HTTP 202"
+                if snapshot_id is not None:
+                    detail += f" with async snapshot {snapshot_id!r}"
+                detail += "; snapshot polling is not part of this ingestion seam"
+                gaps.append(Gap("listing", "unsupported", subreddit=subreddit, detail=detail))
             elif snapshot_id is not None:
                 gaps.append(Gap("listing", "unsupported", subreddit=subreddit, detail=f"Bright Data returned async snapshot {snapshot_id!r}; snapshot polling is not part of this ingestion seam"))
             elif malformed_shape is not None:
@@ -1393,6 +1403,15 @@ class BrightDataProvider(HttpProviderBase):
             batch_record = next((record for record in request_records if record.operation == "refresh"), None)
             if error is not None:
                 gaps.extend(self._provider_gap("post", entity_id=post.post_id, subreddit=post.subreddit, error=error.provider_payload if error.provider_payload is not None else str(error), status=error.status) for post, _ in batch)
+                continue
+            if response is not None and response.status == 202:
+                self._update_accounting(request_records, returned_records=0, provider_error_count=0)
+                snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
+                detail = "Bright Data returned deferred HTTP 202"
+                if snapshot_id is not None:
+                    detail += f" with async snapshot {snapshot_id!r}"
+                detail += "; snapshot polling is not enabled"
+                gaps.extend(Gap("post", "unsupported", entity_id=post.post_id, subreddit=post.subreddit, detail=detail) for post, _ in batch)
                 continue
             raw_items, errors, shape = self._records_and_errors(payload)
             if shape == "snapshot":

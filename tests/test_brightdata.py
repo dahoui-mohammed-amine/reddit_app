@@ -223,6 +223,34 @@ class BrightDataTests(unittest.TestCase):
         self.assertTrue(result.metadata["checkpoint_deferred"])
         self.assertTrue(any(gap.reason == "unsupported" for gap in result.gaps))
 
+    def test_202_array_is_deferred_without_discovery_or_refresh_records(self) -> None:
+        calls: list[int] = []
+
+        def transport(method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float) -> HttpResponse:
+            calls.append(1)
+            return HttpResponse(202, {}, json.dumps([post_record("smallbusiness")]).encode())
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            root = Path(directory)
+            cfg = config(root)
+            client = JsonClient(timeout=1, retries=2, transport=transport, sleep=lambda _: None)
+            provider = BrightDataProvider(cfg, client=client)
+            page = provider.discover("smallbusiness", None, cfg)
+            result = provider.refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(page.posts, [])
+        self.assertTrue(page.metadata["checkpoint_deferred"])
+        self.assertTrue(any(gap.reason == "unsupported" for gap in page.gaps))
+        self.assertEqual(page.request_records[0].metadata["raw_payload"], [post_record("smallbusiness")])
+        self.assertEqual(page.request_records[0].metadata["accounting"]["returned_records"], 0)
+        self.assertEqual(result.posts, [])
+        self.assertTrue(any(gap.reason == "unsupported" for gap in result.gaps))
+        self.assertEqual(result.request_records[0].metadata["raw_payload"], [post_record("smallbusiness")])
+        self.assertEqual(result.request_records[0].metadata["accounting"]["returned_records"], 0)
+
     def test_http_errors_are_not_retried_and_preserve_provider_error(self) -> None:
         for status, expected_reason in ((400, "provider_error"), (401, "provider_error"), (403, "provider_error"), (404, "unavailable"), (429, "provider_error"), (500, "provider_error")):
             calls: list[int] = []
