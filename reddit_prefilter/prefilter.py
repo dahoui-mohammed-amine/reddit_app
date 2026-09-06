@@ -88,6 +88,8 @@ class PrefilterConfig:
     def __post_init__(self) -> None:
         if isinstance(self.subreddit_scope, str) or isinstance(self.spam_markers, str):
             raise ValueError("subreddit_scope and spam_markers must be sequences")
+        subreddit_scope = tuple(self.subreddit_scope)
+        spam_markers = tuple(self.spam_markers)
         if (
             not isinstance(self.minimum_text_length, int)
             or isinstance(self.minimum_text_length, bool)
@@ -96,11 +98,13 @@ class PrefilterConfig:
             raise ValueError("minimum_text_length must be a non-negative integer")
         if any(
             not isinstance(item, str) or not item.strip() or not item.strip().casefold().removeprefix("r/")
-            for item in self.subreddit_scope
+            for item in subreddit_scope
         ):
             raise ValueError("subreddit_scope must contain non-empty subreddit names")
-        if any(not isinstance(item, str) or not item.strip() for item in self.spam_markers):
+        if any(not isinstance(item, str) or not item.strip() for item in spam_markers):
             raise ValueError("spam_markers must contain non-empty strings")
+        object.__setattr__(self, "subreddit_scope", subreddit_scope)
+        object.__setattr__(self, "spam_markers", spam_markers)
 
 
 @dataclass(frozen=True, slots=True)

@@ -719,11 +719,57 @@ class PrefilterTests(unittest.TestCase):
         self.assertEqual(result.decisions[0].reason_codes, ("MALFORMED_RECORD",))
         self.assertEqual(result.decisions[1].reason_codes, ("MALFORMED_RECORD",))
 
+    def test_malformed_record_type_mapping_serializes_as_audit_evidence(self) -> None:
+        records = records_from_fixture(
+            {
+                "records": [
+                    {
+                        "record_type": {"kind": "post"},
+                        "raw": {"id": "post-mapping-type", "title": "Enough"},
+                    }
+                ]
+            },
+            default_lineage=self.lineage,
+        )
+
+        result = Prefilter().evaluate(records)
+        serialized = result.to_dict()
+
+        self.assertEqual(serialized["records"][0]["record_type"], {"kind": "post"})
+        self.assertEqual(serialized["decisions"][0]["record_type"], {"kind": "post"})
+        self.assertEqual(serialized["decisions"][0]["reason_codes"], ["MALFORMED_RECORD"])
+        json.dumps(serialized, sort_keys=True)
+
     def test_sequence_configuration_options_reject_bare_strings(self) -> None:
         with self.assertRaises(ValueError):
             PrefilterConfig(subreddit_scope="freelance")
         with self.assertRaises(ValueError):
             PrefilterConfig(spam_markers="spam")
+
+    def test_sequence_configuration_options_are_snapshotted(self) -> None:
+        marker_generator = iter(("buy now",))
+        scope_values = ["freelance"]
+        config = PrefilterConfig(
+            subreddit_scope=iter(scope_values),
+            spam_markers=marker_generator,
+        )
+        scope_values.clear()
+
+        record = RawRecord(
+            "post",
+            {
+                "id": "post-snapshotted-config",
+                "subreddit": "freelance",
+                "title": "Buy now for a guaranteed result.",
+            },
+            self.lineage,
+        )
+        decision = Prefilter(config).evaluate((record,)).decisions[0]
+
+        self.assertEqual(config.subreddit_scope, ("freelance",))
+        self.assertEqual(config.spam_markers, ("buy now",))
+        self.assertEqual(decision.status, "rejected")
+        self.assertEqual(decision.reason_codes, ("SPAM_MARKER",))
 
     def test_default_spam_rules_remain_conservative_and_configurable(self) -> None:
         record = RawRecord(

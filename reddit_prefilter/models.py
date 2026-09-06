@@ -161,7 +161,7 @@ class RawRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "record_type": self.record_type,
+            "record_type": _thaw(self.record_type),
             "raw": _thaw(self.raw),
             "lineage": _lineage_to_dict(self.lineage),
             "subreddit_context": _thaw(self.subreddit),
@@ -190,7 +190,7 @@ class Decision:
         return {
             "evidence_id": self.evidence_id,
             "raw_sha256": self.raw_sha256,
-            "record_type": self.record_type,
+            "record_type": _thaw(self.record_type),
             "record_id": self.record_id,
             "status": self.status,
             "reason_codes": list(self.reason_codes),
