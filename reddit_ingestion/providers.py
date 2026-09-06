@@ -1188,7 +1188,8 @@ class BrightDataProvider(HttpProviderBase):
             ).casefold()
         else:
             return False
-        target_reference = any(term in text for term in ("post", "submission", "comment", "content", "subreddit", "community"))
+        target_text_reference = any(term in text for term in ("post", "submission", "comment", "content", "subreddit", "community"))
+        target_reference = target_text_reference
         for key in ("url", "input", "requested_url", "original_url"):
             value = error.get(key)
             candidates = [value]
@@ -1198,7 +1199,8 @@ class BrightDataProvider(HttpProviderBase):
                 target_reference = True
                 break
         target_not_found = "not found" in text and target_reference
-        target_marker = any(term in text for term in ("deleted", "removed", "private", "restricted", "unavailable"))
+        generic_outage = any(term in text for term in ("service unavailable", "provider unavailable", "endpoint unavailable", "dataset unavailable", "api unavailable", "temporarily unavailable", "system unavailable"))
+        target_marker = any(term in text for term in ("deleted", "removed", "private", "restricted")) or ("unavailable" in text and target_text_reference and not generic_outage)
         if status == 404 or any(str(error.get(key)).strip() == "404" for key in ("status", "status_code", "code", "error_code")):
             return target_not_found or (target_reference and target_marker)
         return target_reference and (target_not_found or target_marker)
@@ -1359,6 +1361,10 @@ class BrightDataProvider(HttpProviderBase):
         deferred_202 = response is not None and response.status == 202 and self._is_deferred_payload(payload)
         unattributed_record = False
         malformed_record_count = 0
+        duplicate_record_count = 0
+        duplicate_post_ids: set[str] = set()
+        duplicate_subreddits: set[str] = set()
+        seen_post_ids: dict[str, str] = {}
         returned_count = 0
         identity_keys = ("id", "post_id", "fullname", "name")
         downstream_provider_error_count = 0
@@ -1398,7 +1404,31 @@ class BrightDataProvider(HttpProviderBase):
                         unattributed_record = True
                         malformed_record_count += 1
                         continue
+                    try:
+                        normalized_post_id = post_id(raw).casefold()
+                    except (TypeError, ValueError):
+                        normalized_post_id = None
+                    if normalized_post_id is not None:
+                        previous_key = seen_post_ids.get(normalized_post_id)
+                        if previous_key is not None:
+                            duplicate_post_ids.add(normalized_post_id)
+                            duplicate_subreddits.update((previous_key, key))
+                        else:
+                            seen_post_ids[normalized_post_id] = key
                     by_subreddit[key].append(raw)
+                for key, raw_items in by_subreddit.items():
+                    retained_items: list[Mapping[str, Any]] = []
+                    for raw in raw_items:
+                        try:
+                            normalized_post_id = post_id(raw).casefold()
+                        except (TypeError, ValueError):
+                            retained_items.append(raw)
+                            continue
+                        if normalized_post_id in duplicate_post_ids:
+                            duplicate_record_count += 1
+                        else:
+                            retained_items.append(raw)
+                    by_subreddit[key] = retained_items
         batch_urls = [f"https://www.reddit.com/r/{subreddit}/" for subreddit in batch]
         unmatched_specific_errors = [
             item
@@ -1407,7 +1437,7 @@ class BrightDataProvider(HttpProviderBase):
             and not self._error_matches(item, None)
             and not any(self._error_matches(item, target_url) for target_url in batch_urls)
         ]
-        provider_error_count = len(errors) + (1 if error is not None else 0) + (1 if malformed_shape is not None else 0) + malformed_record_count
+        provider_error_count = len(errors) + (1 if error is not None else 0) + (1 if malformed_shape is not None else 0) + malformed_record_count + duplicate_record_count
         for key, raw_items in by_subreddit.items():
             subreddit = next(item for item in batch if self._subreddit_key(item) == key)
             target_url = f"https://www.reddit.com/r/{subreddit}/"
@@ -1438,6 +1468,8 @@ class BrightDataProvider(HttpProviderBase):
                 gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail=f"malformed provider payload: expected a JSON array, got {malformed_shape}"))
             if unattributed_record:
                 gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail="provider returned a discovery record that could not be attributed to a requested subreddit"))
+            if key in duplicate_subreddits:
+                gaps.append(Gap("listing", "provider_error", subreddit=subreddit, detail="provider returned duplicate post identity across discovery inputs"))
             gaps.extend(self._provider_gap("listing", entity_id=None, subreddit=subreddit, error=item) for item in target_errors)
             request_failed = error is not None or bool(raw_items and any(gap.entity_type == "post" for gap in parse_gaps)) or bool(target_errors) or any(gap.entity_type == "listing" and gap.reason in {"provider_error", "unavailable", "unsupported"} for gap in gaps)
             metadata = {

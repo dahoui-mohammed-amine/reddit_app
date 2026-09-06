@@ -86,6 +86,25 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(first.request_records[0].metadata["accounting"]["returned_records"], 1)
         self.assertEqual(client.retries, 0)  # Bright Data never replays collection requests
 
+    def test_discovery_rejects_duplicate_post_ids_across_subreddits(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [post_record("smallbusiness"), post_record("freelance")], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            provider = BrightDataProvider(cfg, client=Client())
+            smallbusiness = provider.discover("smallbusiness", None, cfg)
+            freelance = provider.discover("freelance", None, cfg)
+
+        self.assertEqual(smallbusiness.posts, [])
+        self.assertEqual(freelance.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in smallbusiness.gaps))
+        self.assertTrue(any(gap.reason == "provider_error" for gap in freelance.gaps))
+        self.assertTrue(smallbusiness.metadata["checkpoint_deferred"])
+        self.assertTrue(freelance.metadata["checkpoint_deferred"])
+        self.assertEqual(smallbusiness.request_records[0].metadata["accounting"]["provider_error_count"], 2)
+
     def test_request_evidence_is_persisted_without_turning_records_into_request_units(self) -> None:
         raw = post_record("smallbusiness")
 
@@ -542,6 +561,23 @@ class BrightDataTests(unittest.TestCase):
 
         self.assertEqual([post.post_id for post in result.posts], ["p"])
         self.assertTrue(any(gap.reason == "provider_error" and gap.entity_id == "p" for gap in result.gaps))
+        self.assertTrue(result.metadata["request_failed"])
+
+    def test_service_unavailable_with_target_url_is_provider_error(self) -> None:
+        target = post_record("smallbusiness")
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [{"url": target["url"], "error": "service unavailable"}], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+        self.assertFalse(any(gap.reason == "unavailable" for gap in result.gaps))
         self.assertTrue(result.metadata["request_failed"])
 
     def test_refresh_reports_unmatched_provider_errors_at_batch_scope(self) -> None:
