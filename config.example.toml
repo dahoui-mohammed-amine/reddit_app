@@ -14,7 +14,7 @@ limit = 20
 
 [provider]
 # fixture, redditapis, fetchlayer, or brightdata
-# Bright Data is disabled unless selected explicitly and BRIGHTDATA_API_KEY is set.
+# Bright Data is disabled unless selected explicitly, BRIGHTDATA_API_KEY is set, and --allow-paid is supplied.
 name = "fixture"
 fixture_path = "fixtures/sample.json"
 request_timeout_seconds = 30
