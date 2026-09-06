@@ -398,6 +398,42 @@ class BrightDataTests(unittest.TestCase):
         self.assertTrue(result.metadata["checkpoint_deferred"])
         self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
 
+    def test_present_falsy_discovery_urls_are_rejected(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [{"post_id": "p", "url": self.bad_url, "community_url": "https://www.reddit.com/r/smallbusiness/"}], HttpResponse(200, {}, b""), "request"
+
+        for bad_url in (False, None, ""):
+            with self.subTest(bad_url=bad_url):
+                Client.bad_url = bad_url
+                with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+                    cfg = config(Path(directory), subreddits=("smallbusiness",))
+                    result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+                self.assertEqual(result.posts, [])
+                self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+                self.assertTrue(result.metadata["checkpoint_deferred"])
+
+    def test_refresh_retains_valid_records_and_reports_malformed_items(self) -> None:
+        valid = post_record("smallbusiness")
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [valid, None], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertEqual([post.post_id for post in result.posts], ["p"])
+        self.assertTrue(any(gap.reason == "provider_error" and "not an object" in (gap.detail or "") for gap in result.gaps))
+        self.assertTrue(result.metadata["request_failed"])
+        self.assertEqual(result.metadata["malformed_record_count"], 1)
+        self.assertEqual(result.request_records[0].metadata["accounting"]["returned_records"], 1)
+        self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 1)
+
     def test_202_snapshot_is_a_safe_unsupported_result_without_followup(self) -> None:
         calls: list[int] = []
 

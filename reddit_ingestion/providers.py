@@ -1078,7 +1078,7 @@ class BrightDataProvider(HttpProviderBase):
 
     @classmethod
     def _record_urls_valid(cls, raw: Mapping[str, Any]) -> bool:
-        values = [raw.get(key) for key in ("community_url", "subreddit_url", "url", "post_url", "permalink") if raw.get(key)]
+        values = [raw[key] for key in ("community_url", "subreddit_url", "url", "post_url", "permalink") if key in raw]
         return all(cls._absolute_reddit_url(value) is not None for value in values)
 
     @classmethod
@@ -1486,6 +1486,7 @@ class BrightDataProvider(HttpProviderBase):
         gaps: list[Gap] = []
         records: list[RequestRecord] = []
         observation_requests: dict[str, RequestRecord] = {}
+        malformed_item_count = 0
         pending: list[tuple[PostSnapshot, str]] = []
         for post in posts:
             url = self._requested_post_url(post)
@@ -1528,9 +1529,12 @@ class BrightDataProvider(HttpProviderBase):
             if raw_items is None:
                 gaps.extend(Gap("post", "provider_error", entity_id=post.post_id, subreddit=post.subreddit, detail=f"malformed provider payload: expected a JSON array, got {shape}") for post, _ in batch)
                 continue
+            malformed_items = [item for item in raw_items if not isinstance(item, Mapping)]
+            malformed_item_count += len(malformed_items)
+            gaps.extend(Gap("post", "provider_error", detail="malformed provider payload: refresh item is not an object") for _ in malformed_items)
             output_records = [item for item in raw_items if isinstance(item, Mapping) and not ("error" in item and not any(key in item for key in ("id", "post_id", "fullname", "name")))]
             provider_errors = errors + [item for item in raw_items if isinstance(item, Mapping) and "error" in item and not any(key in item for key in ("id", "post_id", "fullname", "name"))]
-            self._update_accounting(request_records, returned_records=len(output_records), provider_error_count=len(provider_errors))
+            self._update_accounting(request_records, returned_records=len(output_records), provider_error_count=len(provider_errors) + len(malformed_items))
             returned_by_post: dict[str, Mapping[str, Any]] = {}
             for raw in output_records:
                 matches = [post for post, _ in batch if self._post_record_matches(raw, post)]
@@ -1583,6 +1587,8 @@ class BrightDataProvider(HttpProviderBase):
             "comment_dataset_id": self.comments_dataset_id,
             "request_count": len(records),
             "record_count": len(all_posts),
+            "malformed_record_count": malformed_item_count,
+            "request_failed": malformed_item_count > 0,
         }
         return RefreshResult(
             all_posts,
