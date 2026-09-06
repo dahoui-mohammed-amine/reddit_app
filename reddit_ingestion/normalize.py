@@ -76,6 +76,8 @@ def _normalized_aliases(raw: Mapping[str, Any], keys: tuple[str, ...], prefix: s
     for key in keys:
         if key not in raw or raw[key] is None:
             continue
+        if not isinstance(raw[key], (str, int, float, bool)):
+            raise ValueError(f"{label} must be scalar")
         value = str(raw[key])
         if not value:
             raise ValueError(f"{label} is empty")
@@ -114,13 +116,23 @@ def comment_id(raw: Mapping[str, Any]) -> str:
     raise ValueError("comment is missing id or t1_ fullname")
 
 
+def _comment_link_id(raw: Mapping[str, Any]) -> str | None:
+    links = [post_id({"post_id": raw[key]}) for key in ("post_id", "link_id") if key in raw and raw[key] is not None]
+    if links and any(link != links[0] for link in links[1:]):
+        raise ValueError("comment post link aliases disagree")
+    return links[0] if links else None
+
+
 def parse_comment(raw: Mapping[str, Any], *, post: PostSnapshot | None, observed_at: str) -> CommentSnapshot:
     cid = comment_id(raw)
+    linked_post_id = _comment_link_id(raw)
+    if post is not None and linked_post_id is not None and linked_post_id != post.post_id:
+        raise ValueError("comment post link disagrees with requested post")
     fullname = _text(_value(raw, "fullname", "name")) or f"t1_{cid}"
     return CommentSnapshot(
         comment_id=cid,
         fullname=fullname,
-        post_id=post.post_id if post else _text(_value(raw, "post_id", "link_id")),
+        post_id=post.post_id if post else linked_post_id,
         parent_id=_text(_value(raw, "parent_id", "parentFullname")),
         author=_text(_value(raw, "author", "author_username")),
         body=_text(_value(raw, "body", "bodyText", "text")),

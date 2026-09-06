@@ -87,10 +87,30 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                 resume_cursor = checkpoint["cursor"] if checkpoint and checkpoint["provider"] == provider.name else None
                 page_count = config.max_discovery_pages + (1 if resume_cursor else 0)
                 cursor: str | None = None
+                seen_cursors: set[str] = set()
                 for page_number in range(page_count):
                     resumed_page_number = page_number - 1 if resume_cursor else page_number
                     if resume_cursor and page_number == 1:
                         cursor = resume_cursor
+                    if cursor is not None:
+                        cursor = str(cursor)
+                        if cursor in seen_cursors:
+                            page = PageResult(
+                                posts=[],
+                                requested_cursor=cursor,
+                                next_cursor=cursor,
+                                observed_at=utc_now(),
+                                source_url=None,
+                                response_status=None,
+                                request_id=None,
+                                gaps=[Gap("listing", "cursor_cycle", subreddit=subreddit, detail=f"repeated cursor={cursor!r}")],
+                                metadata={"checkpoint_deferred": True, "cursor_cycle": True},
+                            )
+                            with db.transaction():
+                                db.save_page(run_id, provider.name, subreddit, page)
+                            summary.gaps += len(page.gaps)
+                            break
+                        seen_cursors.add(cursor)
                     try:
                         page = provider.discover(subreddit, cursor, config)
                     except ProviderError as exc:
@@ -117,8 +137,14 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                         page.metadata["comments_expanded"] = False
                     if resume_cursor and page_number == 0:
                         page.metadata["checkpoint_deferred"] = True
+                    next_cursor = str(page.next_cursor) if page.next_cursor is not None else None
+                    cursor_cycle = next_cursor is not None and (next_cursor == cursor or next_cursor in seen_cursors)
+                    if cursor_cycle:
+                        page.gaps.append(Gap("listing", "cursor_cycle", subreddit=subreddit, detail=f"repeated cursor={next_cursor!r}"))
+                        page.metadata["checkpoint_deferred"] = True
+                        page.metadata["cursor_cycle"] = True
                     blocked = page.metadata.get("blocked") or any(gap.entity_type == "listing" and gap.reason == "blocked" for gap in page.gaps)
-                    provider_incomplete = page.metadata.get("listing_status") in {"truncated", "unknown"} or any(gap.entity_type == "listing" and gap.reason == "truncated" for gap in page.gaps)
+                    provider_incomplete = page.metadata.get("listing_status") in {"truncated", "unknown"} or any(gap.entity_type == "listing" and gap.reason == "truncated" for gap in page.gaps) or cursor_cycle
                     if provider_incomplete:
                         page.metadata["checkpoint_deferred"] = True
                     at_page_cap = resumed_page_number >= config.max_discovery_pages - 1
@@ -131,7 +157,7 @@ def run_once(db: Database, provider: Provider, config: Config, mode: str, *, all
                     summary.comments += comments
                     summary.gaps += len(page.gaps)
                     summary.requests += _request_units(page.request_records, page.request_id)
-                    if blocked or provider_incomplete or page.metadata.get("request_failed"):
+                    if blocked or provider_incomplete or page.metadata.get("request_failed") or page.metadata.get("cursor_cycle"):
                         break
                     if resume_cursor and page_number == 0:
                         cursor = resume_cursor

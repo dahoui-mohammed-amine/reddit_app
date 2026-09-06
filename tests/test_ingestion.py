@@ -72,6 +72,15 @@ class IngestionTests(unittest.TestCase):
         post = parse_post({"id": "p"})
         with self.assertRaises(ValueError):
             parse_comment({"id": "t1_"}, post=post, observed_at=post.observed_at)
+        with self.assertRaises(ValueError):
+            parse_post({"id": {"bad": 1}})
+
+    def test_comment_links_must_match_requested_post(self) -> None:
+        post = parse_post({"id": "p1"}, observed_at="2026-09-05T00:00:00Z")
+        linked = parse_comment({"id": "c", "link_id": "t3_p1"}, post=post, observed_at=post.observed_at)
+        self.assertEqual(linked.post_id, "p1")
+        with self.assertRaises(ValueError):
+            parse_comment({"id": "c", "link_id": "t3_p2"}, post=post, observed_at=post.observed_at)
 
     def test_normalization_recognizes_deleted_content_markers(self) -> None:
         post = parse_post({"id": "deleted", "author": None, "selftext": "[deleted]"})
@@ -516,6 +525,37 @@ class IngestionTests(unittest.TestCase):
             self.assertIsNone(db.checkpoint("freelance"))
             db.close()
 
+    def test_discovery_cursor_cycle_defers_checkpoint_and_stops(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            def __init__(self) -> None:
+                self.cursors: list[str | None] = []
+
+            def discover(self, subreddit: str, cursor: str | None, config: Config) -> PageResult:
+                self.cursors.append(cursor)
+                observed = "2026-09-05T00:00:00Z"
+                return PageResult(
+                    [PostSnapshot("p", "t3_p", subreddit, num_comments=0, observed_at=observed)],
+                    cursor,
+                    "cycle",
+                    observed,
+                    "fixture://cycle",
+                    200,
+                    "request",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            provider = Provider()
+            cfg = replace(config(root), subreddits=("freelance",), max_discovery_pages=3)
+            run_once(db, provider, cfg, "discover")
+            self.assertEqual(provider.cursors, [None, "cycle"])
+            self.assertEqual(db.checkpoint("freelance")["cursor"], "cycle")
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE reason='cursor_cycle'").fetchone()[0], 1)
+            db.close()
+
     def test_partial_snapshot_preserves_deletion_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -560,6 +600,39 @@ class IngestionTests(unittest.TestCase):
             with db.transaction():
                 db.save_refresh(run_id, "fixture", RefreshResult([cleared], observed, "refresh", 200))
             self.assertEqual(tuple(db.connection.execute("SELECT archived, locked FROM posts WHERE post_id='p'").fetchone()), (0, 0))
+            db.close()
+
+    def test_comment_ownership_conflict_preserves_existing_post(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            first = PostSnapshot("p1", "t3_p1", "freelance", observed_at=observed, comments=[CommentSnapshot("c", "t1_c", "p1", observed_at=observed)])
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([first], None, None, observed, "fixture://p1", 200, "request"))
+            second = PostSnapshot("p2", "t3_p2", "freelance", observed_at=observed, comments=[CommentSnapshot("c", "t1_c", "p2", observed_at=observed)])
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([second], None, None, observed, "fixture://p2", 200, "request"))
+            self.assertEqual(db.connection.execute("SELECT post_id FROM comments WHERE comment_id='c'").fetchone()[0], "p1")
+            self.assertEqual(db.connection.execute("SELECT COUNT(*) FROM gaps WHERE entity_id='c' AND reason='provider_error'").fetchone()[0], 1)
+            db.close()
+
+    def test_partial_refresh_observation_preserves_source_created_at(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = Database(root / "db.sqlite3")
+            source_time = "2026-01-01T00:00:00Z"
+            observed = "2026-09-05T00:00:00Z"
+            run_id = db.start_run("fixture", "discover", {}, observed)
+            initial = PostSnapshot("p", "t3_p", "freelance", created_at=source_time, observed_at=observed)
+            with db.transaction():
+                db.save_page(run_id, "fixture", "freelance", PageResult([initial], None, None, observed, "fixture://p", 200, "request"))
+            partial = PostSnapshot("p", "t3_p", "freelance", observed_at=observed, score=3)
+            with db.transaction():
+                db.save_refresh(run_id, "fixture", RefreshResult([partial], observed, "refresh", 200))
+            source_times = [row[0] for row in db.connection.execute("SELECT source_created_at FROM post_observations WHERE post_id='p' ORDER BY observation_id")]
+            self.assertEqual(source_times, [source_time, source_time])
             db.close()
 
     def test_cache_observation_timestamp_is_persisted_on_request(self) -> None:

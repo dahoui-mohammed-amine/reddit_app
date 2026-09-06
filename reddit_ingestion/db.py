@@ -211,7 +211,9 @@ class Database:
             if post.deleted or post.removed:
                 page.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
             for comment in post.comments:
-                self._save_comment(comment, post.post_id, provider)
+                if not self._save_comment(comment, post.post_id, provider):
+                    page.gaps.append(Gap("comment", "provider_error", entity_id=comment.comment_id, subreddit=post.subreddit, detail="comment belongs to another post"))
+                    continue
                 if comment.deleted or comment.removed:
                     page.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
         listing_status = page.metadata.get("listing_status")
@@ -243,7 +245,9 @@ class Database:
             if post.deleted or post.removed:
                 result.gaps.append(Gap("post", "deleted" if post.deleted else "removed", entity_id=post.post_id, subreddit=post.subreddit))
             for comment in post.comments:
-                self._save_comment(comment, post.post_id, provider)
+                if not self._save_comment(comment, post.post_id, provider):
+                    result.gaps.append(Gap("comment", "provider_error", entity_id=comment.comment_id, subreddit=post.subreddit, detail="comment belongs to another post"))
+                    continue
                 if comment.deleted or comment.removed:
                     result.gaps.append(Gap("comment", "deleted" if comment.deleted else "removed", entity_id=comment.comment_id, subreddit=post.subreddit))
         for gap in result.gaps:
@@ -323,12 +327,21 @@ class Database:
         cache_observed_at = request.cache_observed_at if request else result.cache_observed_at
         result_metadata = result.metadata if result_metadata is None else result_metadata
         metadata = {**request.metadata, **result_metadata} if request else result_metadata
+        source_created_at = post.created_at
+        if not source_created_at:
+            row = self.connection.execute("SELECT created_at FROM posts WHERE post_id = ?", (post.post_id,)).fetchone()
+            source_created_at = row[0] if row else None
         self.connection.execute(
             "INSERT INTO post_observations(post_id, observed_at, provider, source_created_at, score, ups, upvote_ratio, num_comments, response_status, request_id, cache_status, cache_observed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (post.post_id, post.observed_at, provider, post.created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, response_status, request_id, cache_status, cache_observed_at, json.dumps(metadata, sort_keys=True)),
+            (post.post_id, post.observed_at, provider, source_created_at, post.score, post.ups, post.upvote_ratio, post.num_comments, response_status, request_id, cache_status, cache_observed_at, json.dumps(metadata, sort_keys=True)),
         )
 
-    def _save_comment(self, comment: CommentSnapshot, post_id: str, provider: str) -> None:
+    def _save_comment(self, comment: CommentSnapshot, post_id: str, provider: str) -> bool:
+        if comment.post_id and comment.post_id != post_id:
+            return False
+        owner = self.connection.execute("SELECT post_id FROM comments WHERE comment_id = ?", (comment.comment_id,)).fetchone()
+        if owner and owner[0] != post_id:
+            return False
         deleted = int(comment.deleted)
         removed = int(comment.removed)
         body = None if deleted or removed else comment.body
@@ -344,9 +357,10 @@ class Database:
         self.connection.execute(
             f"""INSERT INTO comments(comment_id, fullname, post_id, parent_id, author, body, permalink, created_at, score, ups, depth, deleted, removed, observed_at, provider, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(comment_id) DO UPDATE SET fullname=excluded.fullname, post_id=excluded.post_id, parent_id=COALESCE(excluded.parent_id, comments.parent_id), author=CASE WHEN {clear_comment_content} THEN NULL ELSE COALESCE(excluded.author, comments.author) END, body=CASE WHEN {clear_comment_content} THEN NULL ELSE COALESCE(excluded.body, comments.body) END, permalink=COALESCE(excluded.permalink, comments.permalink), created_at=COALESCE(excluded.created_at, comments.created_at), score=COALESCE(excluded.score, comments.score), ups=COALESCE(excluded.ups, comments.ups), depth=COALESCE(excluded.depth, comments.depth), {deleted_update}, {removed_update}, observed_at=excluded.observed_at, provider=excluded.provider, updated_at=excluded.updated_at""",
+            ON CONFLICT(comment_id) DO UPDATE SET fullname=excluded.fullname, post_id=comments.post_id, parent_id=COALESCE(excluded.parent_id, comments.parent_id), author=CASE WHEN {clear_comment_content} THEN NULL ELSE COALESCE(excluded.author, comments.author) END, body=CASE WHEN {clear_comment_content} THEN NULL ELSE COALESCE(excluded.body, comments.body) END, permalink=COALESCE(excluded.permalink, comments.permalink), created_at=COALESCE(excluded.created_at, comments.created_at), score=COALESCE(excluded.score, comments.score), ups=COALESCE(excluded.ups, comments.ups), depth=COALESCE(excluded.depth, comments.depth), {deleted_update}, {removed_update}, observed_at=excluded.observed_at, provider=excluded.provider, updated_at=excluded.updated_at""",
             (comment.comment_id, comment.fullname or f"t1_{comment.comment_id}", post_id, comment.parent_id, author, body, comment.permalink, comment.created_at, comment.score, comment.ups, comment.depth, deleted, removed, comment.observed_at, provider, comment.observed_at),
         )
+        return True
 
     def _save_gap(self, run_id: str, provider: str, gap: Gap, observed_at: str, *, subreddit: str | None = None) -> None:
         self.connection.execute("INSERT INTO gaps(run_id, entity_type, entity_id, subreddit, reason, detail, observed_at, provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (run_id, gap.entity_type, gap.entity_id, gap.subreddit or subreddit, gap.reason, gap.detail, observed_at, provider))
