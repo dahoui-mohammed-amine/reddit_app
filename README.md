@@ -33,8 +33,9 @@ identifiers, response and cache metadata. A comment may carry `subreddit` on
 payload; its raw `link_id`/`post_id` and `parent_id` are still preserved and
 checked.
 
-A fixture can use the same envelope through `records_from_fixture` or
-`load_fixture`:
+A fixture can use the same envelope through `records_from_fixture`; a
+file-backed fixture can be loaded with `load_fixture` from
+`reddit_prefilter.adapter`:
 
 ```json
 {
@@ -50,11 +51,12 @@ A fixture can use the same envelope through `records_from_fixture` or
 
 The result contains **all** input records and one `Decision` per occurrence.
 Each decision references a SHA-256 evidence ID and includes the raw hash,
-lineage, rule version, normalized text length, relationship IDs, scope result,
-matched markers, and stable reason codes. Filtering therefore never deletes
-source evidence. Duplicate identity is `(record_type, canonical ID)`; the
-first occurrence in input order is canonical and later occurrences are
-rejected as `DUPLICATE_RECORD`.
+lineage, rule version, and stable reason codes. Rule-specific metadata records
+normalized text length, relationship IDs, scope results, and matched markers
+when those checks can be evaluated. Filtering therefore never deletes source
+evidence. Duplicate identity is `(record_type, canonical ID)`; the first
+occurrence in input order is canonical and later occurrences are rejected as
+`DUPLICATE_RECORD`.
 
 ## Rules
 
