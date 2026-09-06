@@ -63,7 +63,7 @@ def _deleted(raw: Mapping[str, Any]) -> bool:
 
 def _removed(raw: Mapping[str, Any]) -> bool:
     markers = [raw[key] for key in ("removed", "is_removed", "removed_by_category") if key in raw]
-    contents = [raw[key] for key in ("body", "bodyText", "selftext") if key in raw]
+    contents = [raw[key] for key in ("body", "bodyText", "selftext", "text") if key in raw]
     return bool(any(markers)) or any(value in {"[removed]", "removed"} for value in contents)
 
 

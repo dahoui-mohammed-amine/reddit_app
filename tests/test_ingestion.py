@@ -85,8 +85,10 @@ class IngestionTests(unittest.TestCase):
     def test_normalization_recognizes_deleted_content_markers(self) -> None:
         post = parse_post({"id": "deleted", "author": None, "selftext": "[deleted]"})
         comment = parse_comment({"id": "comment", "author": None, "body": "[deleted]"}, post=post, observed_at=post.observed_at)
+        removed = parse_comment({"id": "removed", "text": "[removed]"}, post=post, observed_at=post.observed_at)
         self.assertTrue(post.deleted)
         self.assertTrue(comment.deleted)
+        self.assertTrue(removed.removed)
 
     def test_fixture_discovery_collects_comments_and_preserves_request_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -925,11 +927,12 @@ class IngestionTests(unittest.TestCase):
         self.assertTrue(any(delay > 0 for delay in delays))
 
     def test_json_client_reports_terminal_error_and_billing(self) -> None:
-        client = JsonClient(timeout=1, retries=0, transport=lambda *args: HttpResponse(429, {}, b'{"error":"slow"}'), sleep=lambda _: None)
+        client = JsonClient(timeout=1, retries=0, transport=lambda *args: HttpResponse(403, {}, b'{"error":"denied"}'), sleep=lambda _: None)
         with self.assertRaises(ProviderError) as context:
             client.request("GET", "https://example.test", headers={})
-        self.assertTrue(context.exception.retryable)
-        self.assertTrue(context.exception.billed)
+        self.assertFalse(context.exception.retryable)
+        self.assertIsNone(context.exception.billed)
+        self.assertIsNone(context.exception.attempts[-1].billed)
 
     def test_json_client_marks_malformed_success_billing_unknown(self) -> None:
         client = JsonClient(timeout=1, retries=0, transport=lambda *args: HttpResponse(200, {}, b"not-json"), sleep=lambda _: None)
@@ -1081,6 +1084,29 @@ class IngestionTests(unittest.TestCase):
             result = FetchLayerProvider(cfg, client=Client()).discover("freelance", None, cfg)
             self.assertTrue(any(gap.entity_type == "comment" and gap.reason == "provider_error" for gap in result.gaps))
             self.assertFalse(result.metadata["comments_expanded"])
+
+    def test_fetchlayer_discovery_preserves_expansion_engagement_metrics(self) -> None:
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None) -> tuple[dict[str, object], HttpResponse, str]:
+                if "/community-posts" in url:
+                    return {"items": [{"id": "p", "permalink": "/r/freelance/comments/p/post/"}]}, HttpResponse(200, {}, b""), "listing-request"
+                return {
+                    "id": "p",
+                    "name": "t3_p",
+                    "score": 7,
+                    "ups": 8,
+                    "upvote_ratio": 0.9,
+                    "num_comments": 2,
+                    "comments": [{"id": "c1"}, {"id": "c2"}],
+                }, HttpResponse(200, {}, b""), "expansion-request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"FETCHLAYER_API_KEY": "test"}):
+            cfg = config(Path(directory), provider="fetchlayer")
+            result = FetchLayerProvider(cfg, client=Client()).discover("freelance", None, cfg)
+            post = result.posts[0]
+            self.assertEqual((post.score, post.ups, post.upvote_ratio, post.num_comments), (7, 8, 0.9, 2))
+            self.assertTrue(result.metadata["comments_expanded"])
+            self.assertFalse(any(gap.reason == "unexpanded" for gap in result.gaps))
 
     def test_http_403_comment_failures_remain_provider_errors(self) -> None:
         class RedditApisClient:

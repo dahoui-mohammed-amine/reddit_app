@@ -99,7 +99,7 @@ class JsonClient:
                     raise
                 self.sleep(2**attempt)
                 continue
-            self.last_attempts.append(RequestAttempt(response.status, response.status >= 400 and response.status not in {401, 403, 404}))
+            self.last_attempts.append(RequestAttempt(response.status, None))
             if response.status in {408, 425, 429, 500, 502, 503, 504} and attempt < self.retries:
                 retry_after = response.headers.get("retry-after")
                 try:
@@ -120,7 +120,7 @@ class JsonClient:
                     f"provider returned HTTP {response.status}: {parsed.get('error', parsed) if isinstance(parsed, dict) else parsed}",
                     status=response.status,
                     retryable=response.status in {408, 425, 429, 500, 502, 503, 504},
-                    billed=response.status not in {401, 403, 404},
+                    billed=None,
                     request_id=request_id,
                     url=url,
                 )
@@ -712,7 +712,12 @@ class FetchLayerProvider(HttpProviderBase):
                 records.extend(expansion.request_records)
                 gaps.extend(expansion.gaps)
                 if expansion.posts:
-                    post.comments = expansion.posts[0].comments
+                    expanded_post = expansion.posts[0]
+                    post.comments = expanded_post.comments
+                    for field in ("score", "ups", "upvote_ratio", "num_comments"):
+                        value = getattr(expanded_post, field)
+                        if value is not None:
+                            setattr(post, field, value)
         return PageResult(
             posts,
             cursor,
