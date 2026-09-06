@@ -342,6 +342,20 @@ class BrightDataTests(unittest.TestCase):
         self.assertEqual(refreshed.posts, [])
         self.assertTrue(any(gap.reason == "provider_error" for gap in refreshed.gaps))
 
+    def test_bare_host_like_urls_are_rejected(self) -> None:
+        bare_host_url = "evil.example/r/smallbusiness/comments/p/title/"
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [{"post_id": "p", "url": bare_host_url, "community_name": "smallbusiness"}], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+        self.assertEqual(result.posts, [])
+        self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
+
     def test_cross_subreddit_identity_is_rejected(self) -> None:
         discovery_record = {
             "post_id": "p",
@@ -414,6 +428,22 @@ class BrightDataTests(unittest.TestCase):
                 self.assertTrue(any(gap.reason == "provider_error" for gap in result.gaps))
                 self.assertTrue(result.metadata["checkpoint_deferred"])
 
+    def test_discovery_counts_unusable_array_items_as_provider_errors(self) -> None:
+        valid_url = post_record("smallbusiness")["url"]
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [None, {"url": valid_url}], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            result = BrightDataProvider(cfg, client=Client()).discover("smallbusiness", None, cfg)
+
+        self.assertEqual(result.posts, [])
+        self.assertTrue(result.metadata["checkpoint_deferred"])
+        self.assertEqual(result.request_records[0].metadata["accounting"]["returned_records"], 2)
+        self.assertEqual(result.request_records[0].metadata["accounting"]["provider_error_count"], 2)
+
     def test_discovery_requires_a_usable_reddit_post_url(self) -> None:
         class Client:
             def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
@@ -466,6 +496,21 @@ class BrightDataTests(unittest.TestCase):
 
         self.assertEqual([post.post_id for post in result.posts], ["p"])
         self.assertTrue(any(gap.reason == "provider_error" and gap.entity_id == "p" for gap in result.gaps))
+
+    def test_refresh_reports_unmatched_provider_errors_at_batch_scope(self) -> None:
+        unmatched = {"url": "https://www.reddit.com/r/other/comments/q/title/", "error": "provider failure"}
+
+        class Client:
+            def request(self, method: str, url: str, *, headers: dict[str, str], payload: dict[str, object] | None = None):
+                return [unmatched], HttpResponse(200, {}, b""), "request"
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"BRIGHTDATA_API_KEY": "secret"}):
+            cfg = config(Path(directory), subreddits=("smallbusiness",))
+            result = BrightDataProvider(cfg, client=Client()).refresh_posts(
+                [PostSnapshot("p", "t3_p", "smallbusiness", permalink="/r/smallbusiness/comments/p/title/")], cfg
+            )
+
+        self.assertTrue(any(gap.reason == "provider_error" and gap.entity_id is None for gap in result.gaps))
 
     def test_202_snapshot_is_a_safe_unsupported_result_without_followup(self) -> None:
         calls: list[int] = []

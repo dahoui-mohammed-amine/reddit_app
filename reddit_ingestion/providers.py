@@ -1027,7 +1027,12 @@ class BrightDataProvider(HttpProviderBase):
         value = value.strip()
         if "://" in value and not value.startswith(("http://", "https://")):
             return None
-        candidate = value if value.startswith(("http://", "https://")) else f"https://www.reddit.com{value if value.startswith('/') else '/' + value}"
+        if value.startswith(("http://", "https://")):
+            candidate = value
+        elif value.startswith("/") and not value.startswith("//"):
+            candidate = f"https://www.reddit.com{value}"
+        else:
+            return None
         try:
             parsed = urlparse(candidate)
             hostname = parsed.hostname
@@ -1329,6 +1334,7 @@ class BrightDataProvider(HttpProviderBase):
         unattributed_record = False
         malformed_record_count = 0
         returned_count = 0
+        identity_keys = ("id", "post_id", "fullname", "name")
         response_status = response.status if response else error.status if error else None
         if error is not None:
             shared_error = error.provider_payload if error.provider_payload is not None else str(error)
@@ -1346,9 +1352,14 @@ class BrightDataProvider(HttpProviderBase):
                 for raw in raw_records:
                     if not isinstance(raw, Mapping):
                         unattributed_record = True
+                        malformed_record_count += 1
                         continue
-                    if "error" in raw and not any(key in raw for key in ("id", "post_id", "fullname", "name")):
+                    if "error" in raw and not any(key in raw for key in identity_keys):
                         errors.append(raw)
+                        continue
+                    if not any(key in raw for key in identity_keys):
+                        unattributed_record = True
+                        malformed_record_count += 1
                         continue
                     if not self._record_urls_valid(raw) or not self._record_has_post_url(raw):
                         unattributed_record = True
@@ -1583,6 +1594,14 @@ class BrightDataProvider(HttpProviderBase):
                 if isinstance(item, Mapping) and "error" in item and not any(key in item for key in identity_keys)
             ]
             self._update_accounting(request_records, returned_records=len(output_records), provider_error_count=len(provider_errors) + len(malformed_items))
+            requested_urls = [requested_url for _, requested_url in batch]
+            unmatched_provider_errors = [
+                item
+                for item in provider_errors
+                if not self._error_matches(item, None)
+                and not any(self._error_matches(item, requested_url) for requested_url in requested_urls)
+            ]
+            gaps.extend(self._provider_gap("post", entity_id=None, subreddit=None, error=item) for item in unmatched_provider_errors)
             returned_by_post: dict[str, Mapping[str, Any]] = {}
             for raw in output_records:
                 matches = [post for post, _ in batch if self._post_record_matches(raw, post)]
